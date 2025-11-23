@@ -1,0 +1,1 @@
+On first run, QuickBill will automatically re-export your Excel reports (Payments Detail & Summary, Daily/Monthly Sales, and Customer workbooks) to repair previous files so they open without warnings.

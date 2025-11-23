@@ -1,0 +1,865 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:open_filex/open_filex.dart';
+
+import '../core/constants.dart';
+import '../core/app_bus.dart';
+import '../models/customer.dart';
+import '../models/invoice.dart';
+import '../services/storage.dart';
+import '../services/excel_service.dart';
+import '../services/pdf_builder.dart';
+import '../services/paths.dart';
+import '../utils/date.dart';
+import '../utils/format.dart';
+import '../utils/snackbar.dart';
+import '../utils/file_io.dart';
+import '../widgets/invoice_totals_panel.dart';
+
+class InvoiceScreen extends StatefulWidget {
+  const InvoiceScreen({super.key});
+  @override
+  State<InvoiceScreen> createState() => _InvoiceScreenState();
+}
+
+class _InvoiceScreenState extends State<InvoiceScreen>
+    with AutomaticKeepAliveClientMixin {
+  final _customerId = TextEditingController();
+  final _customer = TextEditingController();
+  final _contact = TextEditingController();
+  final _address = TextEditingController();
+  final _date = TextEditingController(text: formatInvoiceDate(DateTime.now()));
+  final _cartageCtrl = TextEditingController(text: '0');
+
+  int _sNo = 1;
+  String _site = kShipmentSites.first;
+
+  List<Customer> _customers = [];
+  List<String> _ids = [], _names = [], _phones = [], _unified = [];
+  bool _customerLocked = false;
+
+  List<String> _brandSuggestions = [];
+  List<String> _addressSuggestions = [];
+
+  final _lines = <ItemLine>[
+    ItemLine('OPC'),
+    ItemLine('SRC'),
+    ItemLine('WHITE CEMENT'),
+    ItemLine('BOUND'),
+    ItemLine('BLOCK'),
+  ];
+
+  static const _screenBg = Color(0xFFF2F5F9);
+  static const _surfaceColor = Color(0xFFFFFFFF);
+  static const _fieldColor = Color(0xFFF5F7FB);
+  static const _borderColor = Color(0xFFE2E8F0);
+  static const _accentColor = Color(0xFF007C89);
+
+  void _resetFormToDefaults({int? nextSerial}) {
+    for (final l in _lines) {
+      l.dispose();
+    }
+    _lines
+      ..clear()
+      ..addAll(kItemTypes.map((t) => ItemLine(t)));
+    _customerId.clear();
+    _customer.clear();
+    _contact.clear();
+    _address.clear();
+    _customerLocked = false;
+    _date.text = formatInvoiceDate(DateTime.now());
+    _cartageCtrl.text = '0';
+    _site = kShipmentSites.first;
+    if (nextSerial != null) _sNo = nextSerial;
+  }
+
+  Future<void> _pickDate() async {
+    DateTime initial;
+    try {
+      initial = parseInvoiceDate(_date.text.trim());
+    } catch (_) {
+      initial = DateTime.now();
+    }
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null) setState(() => _date.text = formatInvoiceDate(picked));
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    Store.nextSerial().then((n) => setState(() => _sNo = n));
+    _loadSuggestions();
+    AppBus.dataTick.addListener(_onDataTick);
+  }
+
+  @override
+  void dispose() {
+    AppBus.dataTick.removeListener(_onDataTick);
+    _customerId.dispose();
+    _customer.dispose();
+    _contact.dispose();
+    _address.dispose();
+    _date.dispose();
+    _cartageCtrl.dispose();
+    for (final l in _lines) {
+      l.dispose();
+    }
+    super.dispose();
+  }
+
+  void _onDataTick() {
+    if (!mounted) return;
+    _loadSuggestions();
+    Store.nextSerial().then((n) {
+      if (mounted) setState(() => _sNo = n);
+    });
+  }
+
+  Future<void> _loadSuggestions() async {
+    _customers = await CustomerStore.loadActive();
+    _ids = _customers
+        .map((c) => c.id)
+        .where((s) => s.trim().isNotEmpty)
+        .toSet()
+        .toList()
+        .cast<String>();
+    _names = _customers
+        .map((c) => c.name)
+        .where((s) => s.trim().isNotEmpty)
+        .toSet()
+        .toList()
+        .cast<String>();
+    _phones = _customers
+        .map((c) => c.contact)
+        .where((s) => s.trim().isNotEmpty)
+        .toSet()
+        .toList()
+        .cast<String>();
+    _unified = _customers
+        .map((c) => '${c.id} - ${c.name} - ${c.contact}')
+        .toList()
+        .cast<String>();
+
+    final invs = await Store.loadAll();
+    _brandSuggestions = invs
+        .expand((inv) => inv.lines.map((l) => l.brand.trim()))
+        .where((s) => s.isNotEmpty)
+        .toSet()
+        .toList()
+        .cast<String>();
+    _addressSuggestions = invs
+        .map((inv) => inv.address.trim())
+        .where((s) => s.isNotEmpty)
+        .toSet()
+        .toList()
+        .cast<String>();
+    if (mounted) setState(() {});
+  }
+
+  void _lockCustomer(Customer c) {
+    setState(() {
+      _customerId.text = c.id;
+      _customer.text = c.name;
+      _contact.text = c.contact;
+      _customerLocked = true;
+    });
+  }
+
+  void _clearCustomer() {
+    setState(() {
+      _customerId.clear();
+      _customer.clear();
+      _contact.clear();
+      _customerLocked = false;
+    });
+    FocusScope.of(context).unfocus();
+  }
+
+  double get _total => _lines.fold(0.0, (s, it) => s + it.amount);
+  double get _cartageVal => double.tryParse(_cartageCtrl.text) ?? 0;
+  double get _balance => (_total + _cartageVal).clamp(0, double.infinity);
+
+  bool _validateInvoiceInputs() {
+    final name = _customer.text.trim();
+    final phone = _contact.text.trim();
+    if (name.isEmpty) {
+      showErr(context, 'Customer name is required.');
+      return false;
+    }
+    if (phone.isEmpty) {
+      showErr(context, 'Customer number is required.');
+      return false;
+    }
+    final hasCompleteItem = _lines.any((l) {
+      final brandOk = l.brand.trim().isNotEmpty;
+      final qtyOk = int.tryParse(l.qtyCtrl.text.trim()) != null &&
+          int.parse(l.qtyCtrl.text.trim()) > 0;
+      final rateOk = double.tryParse(l.rateCtrl.text.trim()) != null &&
+          double.parse(l.rateCtrl.text.trim()) > 0;
+      return brandOk && qtyOk && rateOk;
+    });
+    if (!hasCompleteItem) {
+      showErr(context,
+          'Add at least 1 item with Company, Quantity (>0) and Rate (>0).');
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _saveInvoice() async {
+    if (!_validateInvoiceInputs()) return;
+    final snapshotLines = _lines
+        .map((l) =>
+            ItemLine(l.typeLabel, brand: l.brand, qty: l.qty, rate: l.rate))
+        .toList();
+    if (_customerId.text.trim().isEmpty) {
+      final newId = await CustomerStore.nextCustomerId();
+      _customerId.text = newId;
+      await CustomerStore.addCustomer(
+          newId, _customer.text.trim(), _contact.text.trim());
+      _customerLocked = true;
+    }
+    final inv = Invoice(
+      sNo: _sNo,
+      date: _date.text.trim(),
+      customer: _customer.text.trim(),
+      customerId: _customerId.text.trim().isNotEmpty
+          ? _customerId.text.trim()
+          : _customer.text.trim(),
+      contact: _contact.text.trim(),
+      address: _address.text.trim(),
+      site: _site,
+      lines: snapshotLines,
+      cartage: _cartageVal,
+    );
+    final all = await Store.loadAll();
+    all.add(inv);
+    await Store.saveAll(all);
+    await CustomerStore.upsertFixed(
+        Customer(id: inv.customerId, name: inv.customer, contact: inv.contact));
+    await upsertCustomerWorkbook(inv);
+    await exportDailySalesExcel(parseInvoiceDate(inv.date));
+    await exportMonthlySalesExcel(parseInvoiceDate(inv.date));
+    final pdfBytes = await PdfBuilder.build(inv);
+    final invDir = await subdir('invoices');
+    final pdfFile =
+        File('${invDir.path}${Platform.pathSeparator}invoice_${inv.sNo}.pdf');
+    final written = await safeWriteBytes(pdfFile, pdfBytes);
+    await OpenFilex.open(written.path);
+    if (!mounted) return;
+    showOk(context, 'Saved invoice #${inv.sNo}');
+    final next = await Store.nextSerial();
+    setState(() {
+      _resetFormToDefaults(nextSerial: next);
+    });
+    await _loadSuggestions();
+  }
+
+  Future<void> _saveAndWhatsapp() async {
+    try {
+      if (!_validateInvoiceInputs()) return;
+      final snapshotLines = _lines
+          .map((l) =>
+              ItemLine(l.typeLabel, brand: l.brand, qty: l.qty, rate: l.rate))
+          .toList();
+      if (_customerId.text.trim().isEmpty) {
+        final newId = await CustomerStore.nextCustomerId();
+        _customerId.text = newId;
+        await CustomerStore.addCustomer(
+            newId, _customer.text.trim(), _contact.text.trim());
+        _customerLocked = true;
+      }
+      final inv = Invoice(
+        sNo: _sNo,
+        date: _date.text.trim(),
+        customer: _customer.text.trim(),
+        customerId: _customerId.text.trim().isNotEmpty
+            ? _customerId.text.trim()
+            : _customer.text.trim(),
+        contact: _contact.text.trim(),
+        address: _address.text.trim(),
+        site: _site,
+        lines: snapshotLines,
+        cartage: _cartageVal,
+      );
+      final all = await Store.loadAll();
+      all.add(inv);
+      await Store.saveAll(all);
+      await CustomerStore.upsertFixed(Customer(
+          id: inv.customerId, name: inv.customer, contact: inv.contact));
+      await upsertCustomerWorkbook(inv);
+      await exportDailySalesExcel(parseInvoiceDate(inv.date));
+      await exportMonthlySalesExcel(parseInvoiceDate(inv.date));
+
+      final pdfBytes = await PdfBuilder.build(inv);
+      final invDir = await subdir('invoices');
+      final pdfFile =
+          File('${invDir.path}${Platform.pathSeparator}invoice_${inv.sNo}.pdf');
+      await safeWriteBytes(pdfFile, pdfBytes);
+
+      try {
+        await OpenFilex.open(invDir.path);
+      } catch (_) {
+        if (Platform.isWindows) {
+          try {
+            await Process.run('explorer', [invDir.path]);
+          } catch (_) {}
+        }
+      }
+
+      var raw = _contact.text.trim();
+      var digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
+      if (digits.startsWith('0092')) {
+        digits = digits.substring(2);
+      } else if (digits.startsWith('0')) {
+        digits = '92' + digits.substring(1);
+      } else if (!digits.startsWith('92')) {
+        digits = '92' + digits;
+      }
+      final msg =
+          'Invoice #${inv.sNo}, Date ${inv.date}. Total Rs ${fmt0(inv.total)}, Cartage Rs ${fmt0(inv.cartage)}, Balance Rs ${fmt0(inv.balance)}. Thank you.';
+      final url =
+          'https://wa.me/' + digits + '?text=' + Uri.encodeComponent(msg);
+
+      if (Platform.isWindows) {
+        try {
+          final esc = pdfFile.path.replaceAll("'", "''");
+          await Process.run('powershell',
+              ['-NoProfile', '-Command', "Set-Clipboard -Path '$esc'"]);
+        } catch (_) {}
+      }
+      try {
+        await OpenFilex.open(url);
+      } catch (_) {
+        if (Platform.isWindows) {
+          try {
+            await Process.run('cmd', ['/c', 'start', url]);
+          } catch (_) {}
+        }
+      }
+      if (Platform.isWindows) {
+        try {
+          await Future.delayed(const Duration(seconds: 2));
+          final ps =
+              "\$wshell = New-Object -ComObject wscript.shell; Start-Sleep -Milliseconds 100; \$null = \$wshell.AppActivate('WhatsApp'); Start-Sleep -Milliseconds 200; \$wshell.SendKeys('^v')";
+          await Process.run('powershell', ['-NoProfile', '-Command', ps]);
+        } catch (_) {}
+      }
+
+      if (!mounted) return;
+      showOk(context, 'Saved invoice #${inv.sNo} and prepared WhatsApp.');
+      final next = await Store.nextSerial();
+      setState(() {
+        _resetFormToDefaults(nextSerial: next);
+      });
+      await _loadSuggestions();
+    } catch (_) {
+      if (!mounted) return;
+      showErr(context, 'Could not save or open WhatsApp.');
+    }
+  }
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final width = MediaQuery.of(context).size.width;
+    final isWide = width >= 1100;
+
+    final totalsPanel = InvoiceTotalsPanel(
+      cartageController: _cartageCtrl,
+      total: _total,
+      balance: _balance,
+      onSavePdf: _saveInvoice,
+      onWhatsApp: _saveAndWhatsapp,
+      accentColor: _accentColor,
+    );
+
+    final headerDetails = Wrap(
+      spacing: 24,
+      runSpacing: 12,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text(
+          'S.No: $_sNo',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
+        ),
+        SizedBox(
+          width: 220,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Date',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF5F6B7A),
+                ),
+              ),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _date,
+                readOnly: true,
+                onTap: _pickDate,
+                textAlignVertical: TextAlignVertical.center,
+                decoration: _pillDecoration(
+                  'DD-MM-YYYY',
+                  suffixIcon: const Icon(
+                    Icons.calendar_month,
+                    color: Color(0xFF5F6B7A),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+
+    final formCard = Container(
+      padding: EdgeInsets.all(isWide ? 28 : 20),
+      decoration: BoxDecoration(
+        color: _surfaceColor,
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 40,
+            offset: const Offset(0, 25),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isWide)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(child: headerDetails),
+                const SizedBox(width: 24),
+                SizedBox(width: 320, child: totalsPanel),
+              ],
+            )
+          else ...[
+            headerDetails,
+            const SizedBox(height: 16),
+            totalsPanel,
+          ],
+          const SizedBox(height: 20),
+          Autocomplete<String>(
+            key: ValueKey(
+                'unified-${_customerLocked}-${_customerId.text}-${_customer.text}-${_contact.text}'),
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _unified.where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) async {
+              final id = v.split(' - ').first;
+              final c = await CustomerStore.findById(id);
+              if (c != null) _lockCustomer(c);
+            },
+            fieldViewBuilder: (context, controller, focus, onSubmit) =>
+                TextField(
+              controller: controller,
+              focusNode: focus,
+              enabled: !_customerLocked,
+              decoration:
+                  _pillDecoration('Customer (search by ID / Name / Phone)'),
+              onSubmitted: (v) async {
+                final c = await CustomerStore.findById(v) ??
+                    await CustomerStore.findByName(v) ??
+                    await CustomerStore.findByContact(v);
+                if (c != null) _lockCustomer(c);
+              },
+            ),
+          ),
+          const SizedBox(height: 12),
+          Autocomplete<String>(
+            key: ValueKey('id-${_customerLocked}-${_customerId.text}'),
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _ids.where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) async {
+              final c = await CustomerStore.findById(v);
+              if (c != null) _lockCustomer(c);
+            },
+            fieldViewBuilder: (_, controller, focus, __) {
+              controller.text = _customerId.text;
+              controller.addListener(() => _customerId.text = controller.text);
+              return TextField(
+                controller: controller,
+                focusNode: focus,
+                readOnly: true,
+                decoration: _pillDecoration('Customer ID'),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Autocomplete<String>(
+            key: ValueKey('name-${_customerLocked}-${_customer.text}'),
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _names.where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) async {
+              final c = await CustomerStore.findByName(v);
+              if (c != null) _lockCustomer(c);
+            },
+            fieldViewBuilder: (_, controller, focus, __) {
+              controller.text = _customer.text;
+              controller.addListener(() => _customer.text = controller.text);
+              return TextField(
+                controller: controller,
+                focusNode: focus,
+                readOnly: _customerLocked,
+                enabled: !_customerLocked,
+                decoration: _pillDecoration('Customer Name'),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Autocomplete<String>(
+            key: ValueKey('phone-${_customerLocked}-${_contact.text}'),
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _phones.where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) async {
+              final c = await CustomerStore.findByContact(v);
+              if (c != null) _lockCustomer(c);
+            },
+            fieldViewBuilder: (_, controller, focus, __) {
+              controller.text = _contact.text;
+              controller.addListener(() => _contact.text = controller.text);
+              return TextField(
+                controller: controller,
+                focusNode: focus,
+                readOnly: _customerLocked,
+                enabled: !_customerLocked,
+                decoration: _pillDecoration('Phone'),
+                keyboardType: TextInputType.phone,
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9+]'))
+                ],
+              );
+            },
+          ),
+          if (_customerLocked) ...[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _clearCustomer,
+                icon: const Icon(Icons.lock_open),
+                label: const Text('Change Customer'),
+                style: TextButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: _accentColor,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    side: const BorderSide(color: _borderColor),
+                  ),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Autocomplete<String>(
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _addressSuggestions
+                  .where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) => setState(() => _address.text = v),
+            fieldViewBuilder: (_, controller, focus, __) {
+              controller.text = _address.text;
+              controller.addListener(() => _address.text = controller.text);
+              return TextField(
+                controller: controller,
+                focusNode: focus,
+                decoration: _pillDecoration('Address (optional)'),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            key: ValueKey('site-$_site'),
+            initialValue: _site,
+            items: kShipmentSites
+                .map((s) => DropdownMenuItem(value: s, child: Text(s)))
+                .toList(),
+            onChanged: (v) {
+              if (v != null) setState(() => _site = v);
+            },
+            decoration: _pillDecoration('Shipment Site'),
+          ),
+          const SizedBox(height: 24),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Items',
+              style: Theme.of(context)
+                  .textTheme
+                  .titleLarge
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const SizedBox(height: 12),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final useTwoColumns = constraints.maxWidth > 760;
+              final crossAxisCount = useTwoColumns ? 2 : 1;
+              final aspectRatio = useTwoColumns ? 2.2 : 1.8;
+              return GridView.count(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                crossAxisCount: crossAxisCount,
+                mainAxisSpacing: 16,
+                crossAxisSpacing: 16,
+                childAspectRatio: aspectRatio,
+                children: _lines.map(_itemCard).toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+
+    return Container(
+      color: _screenBg,
+      child: SingleChildScrollView(
+        physics: const ClampingScrollPhysics(),
+        padding:
+            EdgeInsets.symmetric(horizontal: isWide ? 40 : 16, vertical: 24),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1280),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 28, vertical: 26),
+                  decoration: BoxDecoration(
+                    color: _accentColor,
+                    borderRadius: BorderRadius.circular(28),
+                  ),
+                  child: Row(
+                    children: const [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'QuickBill By Abdullah',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 24,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            SizedBox(height: 6),
+                            Text(
+                              'Create and manage invoices',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(width: 20),
+                      Icon(Icons.receipt_long, color: Colors.white, size: 48),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                formCard,
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  InputDecoration _pillDecoration(String hint, {Widget? suffixIcon}) {
+    return InputDecoration(
+      hintText: hint,
+      suffixIcon: suffixIcon,
+      filled: true,
+      fillColor: _fieldColor,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.transparent),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Colors.transparent),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: _accentColor, width: 1.4),
+      ),
+      hintStyle: const TextStyle(color: Color(0xFF5F6B7A)),
+    );
+  }
+
+  Widget _itemCard(ItemLine l) {
+    InputDecoration innerDecoration(String hint) {
+      return _pillDecoration(hint).copyWith(
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      );
+    }
+
+    return Container(
+      key: ValueKey('line-${identityHashCode(l)}'),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: _surfaceColor,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: _borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 18,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(l.typeLabel,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w700, fontSize: 16)),
+              ),
+              IconButton(
+                tooltip: 'Add another ${l.typeLabel}',
+                icon: const Icon(Icons.add),
+                style: IconButton.styleFrom(
+                  backgroundColor: _fieldColor,
+                  foregroundColor: _accentColor,
+                  shape: const CircleBorder(),
+                  padding: const EdgeInsets.all(8),
+                ),
+                onPressed: () {
+                  setState(() {
+                    final idx = _lines.indexOf(l);
+                    _lines.insert(idx + 1, ItemLine(l.typeLabel));
+                  });
+                },
+              ),
+              Builder(
+                builder: (_) {
+                  final sameCount =
+                      _lines.where((x) => x.typeLabel == l.typeLabel).length;
+                  final canDelete = sameCount > 1;
+                  return IconButton(
+                    tooltip: canDelete
+                        ? 'Remove this ${l.typeLabel}'
+                        : 'Cannot remove the last ${l.typeLabel}',
+                    icon: const Icon(Icons.delete_outline),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _fieldColor,
+                      foregroundColor: _accentColor,
+                      shape: const CircleBorder(),
+                      padding: const EdgeInsets.all(8),
+                    ),
+                    onPressed: canDelete
+                        ? () {
+                            setState(() {
+                              l.dispose();
+                              _lines.remove(l);
+                            });
+                          }
+                        : null,
+                  );
+                },
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Autocomplete<String>(
+            key: ValueKey(
+                'brand-${l.typeLabel}-${identityHashCode(l)}-${_lines.indexOf(l)}'),
+            optionsBuilder: (t) {
+              final q = t.text.toLowerCase();
+              return _brandSuggestions
+                  .where((s) => s.toLowerCase().contains(q));
+            },
+            onSelected: (v) => setState(() => l.brand = v),
+            fieldViewBuilder: (_, controller, focus, __) {
+              controller.text = l.brand;
+              controller.selection = TextSelection.fromPosition(
+                  TextPosition(offset: controller.text.length));
+              controller.addListener(() => l.brand = controller.text);
+              return TextField(
+                controller: controller,
+                focusNode: focus,
+                decoration: _pillDecoration('Brand / company'),
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: l.qtyCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))
+                  ],
+                  decoration: innerDecoration('Qty'),
+                  onChanged: (v) {
+                    final n = int.tryParse(v) ?? 0;
+                    if (n != l.qty) setState(() => l.qty = n);
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: TextField(
+                  controller: l.rateCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))
+                  ],
+                  decoration: innerDecoration('Rate'),
+                  onChanged: (v) {
+                    final n = double.tryParse(v) ?? 0;
+                    if (n != l.rate) setState(() => l.rate = n);
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                fmt0(l.amount),
+                style: numStyle(weight: FontWeight.w700, color: _accentColor),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

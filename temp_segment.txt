@@ -1,0 +1,14 @@
+child: RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          controller: _scroll,      // 👈 same controller here
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            // ACTIONS (wraps nicely on smaller windows)
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                FilledButton.icon(
+                  onPressed: () async {
+                    final f = await exportDaily
