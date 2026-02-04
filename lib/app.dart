@@ -14,6 +14,7 @@ import 'screens/monthly_reports_screen.dart';
 import 'screens/payments_screen.dart';
 import 'screens/customer_master_screen.dart';
 import 'screens/history_screen.dart';
+import 'screens/surjani_ledger_screen.dart';
 
 class App extends StatelessWidget {
   const App({super.key});
@@ -110,6 +111,7 @@ class _HomeState extends State<Home> {
       PaymentsScreen(),
       CustomerMasterScreen(),
       HistoryScreen(),
+      SurjaniLedgerScreen(),
     ];
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -124,7 +126,8 @@ class _HomeState extends State<Home> {
       case 2: return "This month's summary & history";
       case 3: return 'Track payments and pending amounts';
       case 4: return 'Customer records and activity';
-      default: return 'Invoice history and backups';
+      case 5: return 'Invoice history and backups';
+      default: return 'Surjani stock/payment ledger';
     }
   }
 
@@ -191,6 +194,7 @@ class _HomeState extends State<Home> {
           BottomNavigationBarItem(icon: Icon(Icons.payments), label: 'Payments'),
           BottomNavigationBarItem(icon: Icon(Icons.people_alt), label: 'Customer Master'),
           BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
+          BottomNavigationBarItem(icon: Icon(Icons.account_balance_wallet), label: 'Surjani Ledger'),
         ],
       ),
     );

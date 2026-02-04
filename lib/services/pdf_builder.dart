@@ -83,7 +83,7 @@ class PdfBuilder {
       pw.Positioned.fill(child: pw.Image(bg, fit: pw.BoxFit.cover)),
       place('${inv.sNo}', xSno, ySno + lift, size: 16, fw: pw.FontWeight.bold),
       place(inv.date, xDate, yDate + lift, size: 16),
-      place(inv.customer, xName, yName + liftName, size: 20, fw: pw.FontWeight.bold),
+      place((inv.customerDisplay ?? inv.customer), xName, yName + liftName, size: 20, fw: pw.FontWeight.bold),
       place(inv.contact,  xContact, yContact + lift, size: 18),
       place(inv.address,  xAddr,    yAddr + lift, size: 18),
       for (int i=0;i<pdfRows.length && i<rowsY.length;i++) ...[
@@ -108,4 +108,3 @@ class PdfBuilder {
     return doc.save();
   }
 }
-

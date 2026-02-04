@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/constants.dart';
+import 'payment.dart';
 
 class ItemLine {
   final String typeLabel;
@@ -9,6 +10,7 @@ class ItemLine {
 
   final TextEditingController qtyCtrl = TextEditingController();
   final TextEditingController rateCtrl = TextEditingController();
+  final FocusNode rateFocus = FocusNode();
 
   ItemLine(this.typeLabel, {this.brand = '', this.qty = 0, this.rate = 0}) {
     qtyCtrl.text = qty == 0 ? '' : '$qty';
@@ -19,13 +21,14 @@ class ItemLine {
   Map<String, dynamic> toJson() => {
     'type': typeLabel, 'brand': brand, 'qty': qty, 'rate': rate, 'amount': amount,
   };
-  void dispose() { qtyCtrl.dispose(); rateCtrl.dispose(); }
+  void dispose() { qtyCtrl.dispose(); rateCtrl.dispose(); rateFocus.dispose(); }
 }
 
 class Invoice {
   int sNo;
   String date;
   String customer;
+  String? customerDisplay;
   String customerId;
   String contact;
   String address;
@@ -33,10 +36,18 @@ class Invoice {
   List<ItemLine> lines;
   double cartage;
   double paid;
+  bool walkIn;
+  PaymentType? walkInPaymentType;
+  String? walkInPaymentNote;
+  String? walkInBank;
+  String? walkInChequeNo;
+  String? walkInTxnId;
+  String? walkInBankMode;
   Invoice({
     required this.sNo,
     required this.date,
     required this.customer,
+    this.customerDisplay,
     required this.customerId,
     required this.contact,
     required this.address,
@@ -44,20 +55,36 @@ class Invoice {
     required this.lines,
     this.cartage = 0,
     this.paid = 0,
+    this.walkIn = false,
+    this.walkInPaymentType,
+    this.walkInPaymentNote,
+    this.walkInBank,
+    this.walkInChequeNo,
+    this.walkInTxnId,
+    this.walkInBankMode,
   });
   double get total => lines.fold(0.0, (s, it) => s + it.amount);
   double get balance => (total + cartage).clamp(0, double.infinity);
   double get remaining => (balance - paid).clamp(0, double.infinity);
 
   Map<String, dynamic> toJson() => {
-    'sNo': sNo, 'date': date, 'customer': customer, 'customerId': customerId,
+    'sNo': sNo, 'date': date, 'customer': customer, 'customerDisplay': customerDisplay,
+    'customerId': customerId,
     'contact': contact, 'address': address, 'site': site, 'cartage': cartage,
     'total': total, 'balance': balance, 'paid': paid, 'remaining': remaining,
+    'walkIn': walkIn,
+    'walkInPaymentType': walkInPaymentType == null ? null : paymentTypeLabel(walkInPaymentType!),
+    'walkInPaymentNote': walkInPaymentNote,
+    'walkInBank': walkInBank,
+    'walkInChequeNo': walkInChequeNo,
+    'walkInTxnId': walkInTxnId,
+    'walkInBankMode': walkInBankMode,
     'lines': lines.map((e) => e.toJson()).toList(),
   };
 
   static Invoice fromJson(Map<String, dynamic> j) => Invoice(
     sNo: j['sNo'], date: j['date'], customer: j['customer'],
+    customerDisplay: (j['customerDisplay'] ?? j['customer'])?.toString(),
     customerId: (j['customerId'] ?? '').toString(),
     contact: j['contact'], address: j['address'],
     site: (j['site'] ?? '').toString(),
@@ -71,6 +98,25 @@ class Invoice {
     }).toList(),
     cartage: (j['cartage'] as num?)?.toDouble() ?? 0.0,
     paid: (j['paid'] as num?)?.toDouble() ?? 0.0,
+    walkIn: j['walkIn'] == true || (j['walkIn']?.toString().toLowerCase() == 'true'),
+    walkInPaymentType: ((j['walkInPaymentType'] ?? '').toString().trim().isEmpty)
+        ? null
+        : paymentTypeFromString((j['walkInPaymentType'] ?? '').toString()),
+    walkInPaymentNote: ((j['walkInPaymentNote'] ?? '').toString().trim().isEmpty)
+        ? null
+        : (j['walkInPaymentNote'] ?? '').toString(),
+    walkInBank: ((j['walkInBank'] ?? '').toString().trim().isEmpty)
+        ? null
+        : (j['walkInBank'] ?? '').toString(),
+    walkInChequeNo: ((j['walkInChequeNo'] ?? '').toString().trim().isEmpty)
+        ? null
+        : (j['walkInChequeNo'] ?? '').toString(),
+    walkInTxnId: ((j['walkInTxnId'] ?? '').toString().trim().isEmpty)
+        ? null
+        : (j['walkInTxnId'] ?? '').toString(),
+    walkInBankMode: ((j['walkInBankMode'] ?? '').toString().trim().isEmpty)
+        ? null
+        : (j['walkInBankMode'] ?? '').toString(),
   );
 }
 
@@ -107,4 +153,3 @@ List<ItemLine> summarizeInvoiceLines(List<ItemLine> lines) {
   }
   return out;
 }
-

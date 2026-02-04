@@ -1,5 +1,4 @@
 enum PaymentType { cash, cheque, bank }
-enum PaymentStatus { cleared, pending, bounced }
 
 String paymentTypeLabel(PaymentType t) {
   switch (t) {
@@ -12,32 +11,6 @@ String paymentTypeLabel(PaymentType t) {
   }
 }
 
-String paymentStatusLabel(PaymentStatus s) {
-  switch (s) {
-    case PaymentStatus.cleared:
-      return 'Cleared';
-    case PaymentStatus.pending:
-      return 'Pending';
-    case PaymentStatus.bounced:
-      return 'Bounced';
-  }
-}
-
-String statusTextForEntry(PaymentEntry e) {
-  if (e.type == PaymentType.bank && e.status == PaymentStatus.bounced) {
-    return 'Returned';
-  }
-  return paymentStatusLabel(e.status);
-}
-
-PaymentStatus paymentStatusFromString(String s) {
-  final v = s.toLowerCase().trim();
-  if (v == 'cleared') return PaymentStatus.cleared;
-  if (v == 'pending') return PaymentStatus.pending;
-  if (v == 'bounced') return PaymentStatus.bounced;
-  return PaymentStatus.pending;
-}
-
 PaymentType paymentTypeFromString(String s) {
   final v = s.toLowerCase().trim();
   if (v == 'cash') return PaymentType.cash;
@@ -46,7 +19,81 @@ PaymentType paymentTypeFromString(String s) {
   return PaymentType.cash;
 }
 
+/// Customer-ledger (khata) entry.
+/// Positive [amount] means money received from customer (reduces their debit).
 class PaymentEntry {
+  final String id;
+  final String date;
+  final String customerId;
+  final String customer;
+  final PaymentType type;
+  final double amount;
+  final double discount; // Optional discount applied with this payment.
+  final String? note;
+  final String? chequeNo;
+  final String? bank;
+  final String? txnId;
+  final String? bankMode;
+
+  const PaymentEntry({
+    required this.id,
+    required this.date,
+    required this.customerId,
+    required this.customer,
+    required this.type,
+    required this.amount,
+    this.discount = 0,
+    this.note,
+    this.chequeNo,
+    this.bank,
+    this.txnId,
+    this.bankMode,
+  });
+
+  double get effectiveAmount => amount + discount;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'date': date,
+        'customerId': customerId,
+        'customer': customer,
+        'type': paymentTypeLabel(type),
+        'amount': amount,
+        'discount': discount,
+        'note': note,
+        'chequeNo': chequeNo,
+        'bank': bank,
+        'txnId': txnId,
+        'bankMode': bankMode,
+      };
+
+  static PaymentEntry fromJson(Map<String, dynamic> j) => PaymentEntry(
+        id: (j['id'] ?? '').toString(),
+        date: (j['date'] ?? '').toString(),
+        customerId: (j['customerId'] ?? '').toString(),
+        customer: (j['customer'] ?? '').toString(),
+        type: paymentTypeFromString((j['type'] ?? '').toString()),
+        amount: (j['amount'] as num?)?.toDouble() ?? 0.0,
+        discount: (j['discount'] as num?)?.toDouble() ?? 0.0,
+        note: (j['note'] ?? '') == '' ? null : (j['note'] ?? '').toString(),
+        chequeNo: (j['chequeNo'] ?? '') == '' ? null : (j['chequeNo'] ?? '').toString(),
+        bank: (j['bank'] ?? '') == '' ? null : (j['bank'] ?? '').toString(),
+        txnId: (j['txnId'] ?? '') == '' ? null : (j['txnId'] ?? '').toString(),
+        bankMode: (j['bankMode'] ?? '') == '' ? null : (j['bankMode'] ?? '').toString(),
+      );
+}
+
+// ---- Legacy support for migrating old invoice-based payment records ----
+enum LegacyPaymentStatus { cleared, pending, bounced }
+
+LegacyPaymentStatus _legacyStatusFromString(String s) {
+  final v = s.toLowerCase().trim();
+  if (v == 'cleared') return LegacyPaymentStatus.cleared;
+  if (v == 'bounced') return LegacyPaymentStatus.bounced;
+  return LegacyPaymentStatus.pending;
+}
+
+class LegacyPaymentEntry {
   final String id;
   final String date;
   final int invoiceNo;
@@ -58,11 +105,10 @@ class PaymentEntry {
   final String? bank;
   final String? txnId;
   final String? bankMode;
-  PaymentStatus status;
+  final LegacyPaymentStatus status;
   final String batchId;
   final String groupId;
-
-  PaymentEntry({
+  const LegacyPaymentEntry({
     required this.id,
     required this.date,
     required this.invoiceNo,
@@ -79,24 +125,7 @@ class PaymentEntry {
     required this.groupId,
   });
 
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'date': date,
-        'invoiceNo': invoiceNo,
-        'invoiceDate': invoiceDate,
-        'customer': customer,
-        'type': paymentTypeLabel(type),
-        'amount': amount,
-        'chequeNo': chequeNo,
-        'bank': bank,
-        'txnId': txnId,
-        'bankMode': bankMode,
-        'status': paymentStatusLabel(status),
-        'batchId': batchId,
-        'groupId': groupId,
-      };
-
-  static PaymentEntry fromJson(Map<String, dynamic> j) => PaymentEntry(
+  static LegacyPaymentEntry fromJson(Map<String, dynamic> j) => LegacyPaymentEntry(
         id: (j['id'] ?? '').toString(),
         date: (j['date'] ?? '').toString(),
         invoiceNo: (j['invoiceNo'] as num?)?.toInt() ?? 0,
@@ -108,9 +137,8 @@ class PaymentEntry {
         bank: (j['bank'] ?? '') == '' ? null : (j['bank'] ?? '').toString(),
         txnId: (j['txnId'] ?? '') == '' ? null : (j['txnId'] ?? '').toString(),
         bankMode: (j['bankMode'] ?? '') == '' ? null : (j['bankMode'] ?? '').toString(),
-        status: paymentStatusFromString((j['status'] ?? 'Pending').toString()),
+        status: _legacyStatusFromString((j['status'] ?? 'Pending').toString()),
         batchId: (j['batchId'] ?? '').toString(),
         groupId: (j['groupId'] ?? '').toString(),
       );
 }
-

@@ -5,7 +5,9 @@ import '../core/constants.dart';
 import '../models/payment.dart';
 import '../models/invoice.dart';
 import '../models/customer.dart';
+import '../models/surjani_ledger_entry.dart';
 import '../services/storage.dart';
+import 'surjani_ledger_store.dart';
 import '../utils/date.dart';
 import '../utils/format.dart';
 import 'paths.dart';
@@ -93,6 +95,23 @@ List<String> excelDisplayTriple(List<ItemLine> lines, String type) {
   return [brands.join(' + '), qtys.join(' + '), rates.join(' + ')];
 }
 
+String saleShortSummary(Invoice inv) {
+  final parts = <String>[];
+  for (final t in kItemTypes) {
+    final same = inv.lines.where((l) => l.typeLabel == t && l.qty > 0).toList();
+    if (same.isEmpty) continue;
+    int qty = 0;
+    double amt = 0.0;
+    for (final l in same) {
+      qty += l.qty;
+      amt += l.qty * l.rate;
+    }
+    final rate = qty > 0 ? amt / qty : 0.0;
+    parts.add('$t $qty ${fmt0(rate)}');
+  }
+  return parts.join(' | ');
+}
+
 List<CellValue?> _cellsFromRow(List<String> headers, List<dynamic> row, Set<String> numericHeaders) {
   final out = <CellValue?>[];
   for (int i = 0; i < headers.length; i++) {
@@ -114,7 +133,7 @@ List<CellValue?> _cellsFromRow(List<String> headers, List<dynamic> row, Set<Stri
 }
 
 Set<String> _numericHeadersForSales(List<String> headers) {
-  return {'SNO','CARTAGE','TOTAL','BALANCE','PAYMENT RECEIVED','PAYMENT REMAINING'};
+  return {'SNO','CARTAGE','TOTAL'};
 }
 
 String _safeName(String s) => s.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
@@ -154,6 +173,15 @@ Future<File> customerWorkbookFileFromKey(String key) async {
   return File('${custDir.path}${Platform.pathSeparator}$display.xlsx');
 }
 
+Future<File> customerLedgerFileFromKey(String key) async {
+  final base = await baseDir();
+  final custDir = Directory('${base.path}${Platform.pathSeparator}customers');
+  if (!await custDir.exists()) await custDir.create(recursive: true);
+  final file = await customerWorkbookFileFromKey(key);
+  final path = file.path.replaceAll('.xlsx', '_ledger.xlsx');
+  return File(path);
+}
+
 Future<File> rebuildCustomerWorkbookForKey(String key) async {
   final all = await Store.loadAll();
   final custInvs = all.where((i) => (i.customerId.isNotEmpty ? i.customerId : i.customer).trim().toLowerCase() == key.trim().toLowerCase()).toList()
@@ -163,9 +191,9 @@ Future<File> rebuildCustomerWorkbookForKey(String key) async {
 
   const types = kItemTypes;
   final headers = <String>[
-    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE',
+    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE','NOTE',
     ...types.expand((t)=>['$t BRAND','$t QTY','$t RATE']),
-    'CARTAGE','TOTAL','BALANCE','PAYMENT RECEIVED','PAYMENT REMAINING'
+    'CARTAGE','TOTAL'
   ];
 
   final byYear = <String, List<Invoice>>{};
@@ -191,8 +219,8 @@ Future<File> rebuildCustomerWorkbookForKey(String key) async {
         perType.addAll([disp[0], disp[1], disp[2]]);
       }
       final row = [
-        inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site,
-        ...perType, inv.cartage.round(), inv.total.round(), inv.balance.round(), inv.paid.round(), inv.remaining.round()
+        inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site, saleShortSummary(inv),
+        ...perType, inv.cartage.round(), inv.total.round()
       ];
       final numericCols = _numericHeadersForSales(headers);
       sheet.appendRow(_cellsFromRow(headers, row, numericCols));
@@ -221,8 +249,6 @@ Future<File> upsertCustomerWorkbook(Invoice inv) async {
 void _appendSummaryBlock(Sheet sheet, List<String> headers, List<List<dynamic>> dataRows) {
   final iTotal   = headers.indexOf('TOTAL');
   final iCartage = headers.indexOf('CARTAGE');
-  final iPaid    = headers.indexOf('PAYMENT RECEIVED');
-  final iRemain  = headers.indexOf('PAYMENT REMAINING');
   double sumAt(int col) {
     if (col < 0) return 0.0;
     double s = 0.0;
@@ -241,15 +267,11 @@ void _appendSummaryBlock(Sheet sheet, List<String> headers, List<List<dynamic>> 
   }
   final totalSum   = sumAt(iTotal);
   final cartageSum = sumAt(iCartage);
-  final paidSum    = sumAt(iPaid);
-  final remainSum  = sumAt(iRemain);
   final startRow = dataRows.length + 2;
   final rows = <List<dynamic>>[
     ['DAILY SUMMARY', ''],
     ['Total Sales (Rs)',            totalSum],
     ['Total Cartage (Rs)',          cartageSum],
-    ['Total Payment Received (Rs)', paidSum],
-    ['Pending Balances (Rs)',       remainSum],
   ];
   for (int i = 0; i < rows.length; i++) {
     final r = startRow + i;
@@ -280,9 +302,9 @@ Future<File> exportDailySalesExcel(DateTime day) async {
   final sheet = excel[sheetName];
   const types = kItemTypes;
   final headers = <String>[
-    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE',
+    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE','NOTE',
     ...types.expand((t)=>['$t BRAND','$t QTY','$t RATE']),
-    'CARTAGE','TOTAL','BALANCE','PAYMENT RECEIVED','PAYMENT REMAINING'
+    'CARTAGE','TOTAL'
   ];
   sheet.appendRow(headers.map<CellValue?>((s) => TextCellValue(s)).toList());
   _styleHeaderRow(sheet, headers);
@@ -291,8 +313,8 @@ Future<File> exportDailySalesExcel(DateTime day) async {
     final perType = <dynamic>[];
     for (final t in types) { final disp = excelDisplayTriple(inv.lines, t); perType.addAll([disp[0], disp[1], disp[2]]); }
     final row = [
-      inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site,
-      ...perType, inv.cartage.round(), inv.total.round(), inv.balance.round(), inv.paid.round(), inv.remaining.round()
+      inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site, saleShortSummary(inv),
+      ...perType, inv.cartage.round(), inv.total.round()
     ];
     final numericCols = _numericHeadersForSales(headers);
     sheet.appendRow(_cellsFromRow(headers, row, numericCols));
@@ -327,9 +349,9 @@ Future<File> exportMonthlySalesExcel([DateTime? month]) async {
   final sheet = excel[sheetName];
   const types = kItemTypes;
   final headers = <String>[
-    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE',
+    'SNO','DATE','CUSTOMER ID','CUSTOMER NAME','CONTACT','ADDRESS','SHIPMENT SITE','NOTE',
     ...types.expand((t)=>['$t BRAND','$t QTY','$t RATE']),
-    'CARTAGE','TOTAL','BALANCE','PAYMENT RECEIVED','PAYMENT REMAINING'
+    'CARTAGE','TOTAL'
   ];
   sheet.appendRow(headers.map<CellValue?>((s) => TextCellValue(s)).toList());
   _styleHeaderRow(sheet, headers);
@@ -338,8 +360,8 @@ Future<File> exportMonthlySalesExcel([DateTime? month]) async {
     final perType = <dynamic>[];
     for (final t in types) { final disp = excelDisplayTriple(inv.lines, t); perType.addAll([disp[0], disp[1], disp[2]]); }
     final row = [
-      inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site,
-      ...perType, inv.cartage.round(), inv.total.round(), inv.balance.round(), inv.paid.round(), inv.remaining.round()
+      inv.sNo, inv.date, inv.customerId, inv.customer, inv.contact, inv.address, inv.site, saleShortSummary(inv),
+      ...perType, inv.cartage.round(), inv.total.round()
     ];
     final numericCols = _numericHeadersForSales(headers);
     sheet.appendRow(_cellsFromRow(headers, row, numericCols));
@@ -400,11 +422,11 @@ Future<List<File>> rebuildMonthlyPaymentsExcels([DateTime? month]) async {
   final all = await PaymentStore.loadAll();
   final monthEntries = all.where((e) {
     try { final d = parseInvoiceDate(e.date); return d.year == dt.year && d.month == dt.month; } catch (_) { return false; }
-  }).toList()..sort((a,b)=>a.invoiceNo.compareTo(b.invoiceNo));
+  }).toList()..sort((a,b)=>a.date.compareTo(b.date));
 
   final detail = Excel.createExcel();
   final dName = 'DETAIL $ym'; _ensureDefaultSheetRenamed(detail, dName); final dSheet = detail[dName];
-  final dHeaders = <String>['DATE','INVOICE NO','CUSTOMER','PAYMENT TYPE','AMOUNT','CHEQUE NO','BANK','MODE','TXN ID','STATUS','BATCH ID','GROUP ID'];
+  final dHeaders = <String>['DATE','CUSTOMER ID','CUSTOMER NAME','PAYMENT TYPE','AMOUNT','NOTE','CHEQUE NO','BANK','MODE','TXN ID'];
   dSheet.appendRow(dHeaders.map<CellValue?>((s) => TextCellValue(s)).toList()); _styleHeaderRow(dSheet, dHeaders);
   final dRows = <List<dynamic>>[];
   String asciiSafe(String s) {
@@ -421,9 +443,13 @@ Future<List<File>> rebuildMonthlyPaymentsExcels([DateTime? month]) async {
     return sb.toString();
   }
   List<dynamic> sanitizeRow(List<dynamic> row) => row.map((v) => v is String ? asciiSafe(v) : v).toList();
-  List<CellValue?> asCellsPaymentsDetail(List<dynamic> row) { const numericCols = {'INVOICE NO','AMOUNT'}; return _cellsFromRow(dHeaders, row, numericCols); }
+  List<CellValue?> asCellsPaymentsDetail(List<dynamic> row) { const numericCols = {'AMOUNT'}; return _cellsFromRow(dHeaders, row, numericCols); }
   for (final e in monthEntries) {
-    final row = [ e.date, e.invoiceNo, e.customer, paymentTypeLabel(e.type), e.amount, e.chequeNo ?? '', e.bank ?? '', (e.type == PaymentType.bank ? (e.bankMode ?? '') : ''), e.txnId ?? '', statusTextForEntry(e), e.batchId, e.groupId ];
+    final noteParts = <String>[];
+    if ((e.note ?? '').isNotEmpty) noteParts.add(e.note!);
+    if (e.discount.abs() > 0.0001) noteParts.add('Discount ${fmt0(e.discount)}');
+    final combinedNote = noteParts.join(' | ');
+    final row = [ e.date, e.customerId, e.customer, paymentTypeLabel(e.type), e.effectiveAmount, combinedNote, e.chequeNo ?? '', e.bank ?? '', (e.type == PaymentType.bank ? (e.bankMode ?? '') : ''), e.txnId ?? '' ];
     dSheet.appendRow(asCellsPaymentsDetail(sanitizeRow(row))); dRows.add(row);
   }
   _autoSizeColumns(dSheet, [dHeaders, ...dRows.take(200)], 10); _cleanupSheetsAndSetDefault(detail, dName);
@@ -431,20 +457,24 @@ Future<List<File>> rebuildMonthlyPaymentsExcels([DateTime? month]) async {
   final detailFile = File('${detailsDir.path}${Platform.pathSeparator}Payments_Detail_$ym.xlsx'); await detailFile.writeAsBytes(detail.encode()!, flush: true);
 
   final summary = Excel.createExcel(); final sName = 'SUMMARY $ym'; _ensureDefaultSheetRenamed(summary, sName); final sSheet = summary[sName];
-  final sHeaders = <String>['DATE','INVOICE NO','CUSTOMER','PAYMENT METHODS','METHOD AMOUNTS','STATUS','TOTAL PAID','REMAINING'];
+  final sHeaders = <String>['CUSTOMER ID','CUSTOMER NAME','PAYMENTS (MONTH)','ENTRIES'];
   sSheet.appendRow(sHeaders.map<CellValue?>((s) => TextCellValue(s)).toList()); _styleHeaderRow(sSheet, sHeaders);
-  final byInvoice = <int, List<PaymentEntry>>{}; for (final e in monthEntries) { byInvoice.putIfAbsent(e.invoiceNo, () => []).add(e); }
-  final invoices = await Store.loadAll();
-  Invoice findInv(int sNo) => invoices.firstWhere((i) => i.sNo == sNo, orElse: () => Invoice(sNo: sNo, date: '', customer: '', customerId: '', contact: '', address: '', lines: [], cartage: 0, paid: 0));
-  final sRows = <List<dynamic>>[]; final sortedInvNos = byInvoice.keys.toList()..sort();
-  for (final invNo in sortedInvNos) {
-    final list = byInvoice[invNo] ?? const <PaymentEntry>[]; final inv = findInv(invNo);
-    final methods = list.map((e) => paymentTypeLabel(e.type)).join(' + ');
-    final amounts = list.map((e) => e.amount.toStringAsFixed(0)).join(' + ');
-    final statuses = list.map((e) => statusTextForEntry(e)).join(' + ');
-    final totalPaid = inv.paid; final remaining = inv.remaining; final dateFirst = list.isNotEmpty ? list.first.date : inv.date;
-    final row = [ dateFirst, invNo, inv.customer, methods, amounts, statuses, totalPaid, remaining ];
-    const numericCols = {'INVOICE NO','TOTAL PAID','REMAINING'}; sSheet.appendRow(_cellsFromRow(sHeaders, sanitizeRow(row), numericCols)); sRows.add(row);
+  final byCustomer = <String, List<PaymentEntry>>{};
+  for (final e in monthEntries) {
+    final key = (e.customerId.isNotEmpty ? e.customerId : e.customer).trim().toLowerCase();
+    (byCustomer[key] ??= []).add(e);
+  }
+  final sRows = <List<dynamic>>[];
+  for (final entry in byCustomer.entries) {
+    final list = entry.value;
+    if (list.isEmpty) continue;
+    final sample = list.first;
+    final custId = sample.customerId;
+    final custName = sample.customer;
+    final total = list.map((e) => e.effectiveAmount).fold<double>(0.0, (s, a) => s + a);
+    final row = [custId, custName, total, list.length];
+    const numericCols = {'PAYMENTS (MONTH)','ENTRIES'};
+    sSheet.appendRow(_cellsFromRow(sHeaders, sanitizeRow(row), numericCols)); sRows.add(row);
   }
   _autoSizeColumns(sSheet, [sHeaders, ...sRows.take(200)], 10); _cleanupSheetsAndSetDefault(summary, sName);
   final summaryDir = Directory('${payDir.path}${Platform.pathSeparator}payment_summary'); if (!await summaryDir.exists()) { await summaryDir.create(recursive: true); }
@@ -452,49 +482,403 @@ Future<List<File>> rebuildMonthlyPaymentsExcels([DateTime? month]) async {
   return [summaryFile, detailFile];
 }
 
-Future<List<PaymentEntry>> addPaymentForInvoices({
+Future<File> exportDailyLedger(DateTime day) async {
+  final invoices = await Store.loadAll();
+  final payments = await PaymentStore.loadAll();
+  final rows = <_LedgerRow>[];
+
+  for (final inv in invoices) {
+    try {
+      final d = parseInvoiceDate(inv.date);
+      if (d.year == day.year && d.month == day.month && d.day == day.day) {
+        rows.add(_LedgerRow(
+          date: d,
+          type: 'Sale',
+          customer: inv.customer,
+          ref: 'Invoice ${inv.sNo}',
+          note: _saleNote(inv),
+          debit: inv.balance,
+          credit: 0.0,
+        ));
+      }
+    } catch (_) {}
+  }
+  for (final p in payments) {
+    try {
+      final d = parseInvoiceDate(p.date);
+      if (d.year == day.year && d.month == day.month && d.day == day.day) {
+        rows.add(_LedgerRow(
+          date: d,
+          type: 'Payment',
+          customer: p.customer,
+          ref: p.id,
+          note: _ledgerNoteForPayment(p),
+          debit: 0.0,
+          credit: p.effectiveAmount,
+        ));
+      }
+    } catch (_) {}
+  }
+  final dir = await subdir('ledgers_daily');
+  return _writeLedgerExcel(rows, 'LEDGER ${formatInvoiceDate(day)}', dir.path, 'Ledger_${formatInvoiceDate(day)}.xlsx');
+}
+
+Future<File> exportMonthlyLedger([DateTime? month]) async {
+  final base = month ?? DateTime.now();
+  final invoices = await Store.loadAll();
+  final payments = await PaymentStore.loadAll();
+  final rows = <_LedgerRow>[];
+
+  for (final inv in invoices) {
+    try {
+      final d = parseInvoiceDate(inv.date);
+      if (d.year == base.year && d.month == base.month) {
+        rows.add(_LedgerRow(
+          date: d,
+          type: 'Sale',
+          customer: inv.customer,
+          ref: 'Invoice ${inv.sNo}',
+          note: _saleNote(inv),
+          debit: inv.balance,
+          credit: 0.0,
+        ));
+      }
+    } catch (_) {}
+  }
+  for (final p in payments) {
+    try {
+      final d = parseInvoiceDate(p.date);
+      if (d.year == base.year && d.month == base.month) {
+        rows.add(_LedgerRow(
+          date: d,
+          type: 'Payment',
+          customer: p.customer,
+          ref: p.id,
+          note: _ledgerNoteForPayment(p),
+          debit: 0.0,
+          credit: p.effectiveAmount,
+        ));
+      }
+    } catch (_) {}
+  }
+  final ym = DateFormat('yyyy-MM').format(base);
+  final dir = await subdir('ledgers_monthly');
+  return _writeLedgerExcel(rows, 'LEDGER $ym', dir.path, 'Ledger_$ym.xlsx');
+}
+
+Future<File> exportCustomerLedger(String key) async {
+  final invoices = await Store.loadAll();
+  final payments = await PaymentStore.loadAll();
+  String norm(String s) => s.trim().toLowerCase();
+  final ledgerKey = norm(key);
+  final invs = invoices.where((i) => norm(i.customerId.isNotEmpty ? i.customerId : i.customer) == ledgerKey).toList();
+  final pays = payments.where((p) => norm(p.customerId.isNotEmpty ? p.customerId : p.customer) == ledgerKey).toList();
+
+  String customerId = '';
+  String customerName = '';
+  try {
+    final c = await CustomerStore.findById(key);
+    if (c != null) { customerId = c.id; customerName = c.name; }
+  } catch (_) {}
+  if (customerId.isEmpty && customerName.isEmpty) {
+    if (invs.isNotEmpty) { customerId = invs.first.customerId; customerName = invs.first.customer; }
+    else if (pays.isNotEmpty) { customerId = pays.first.customerId; customerName = pays.first.customer; }
+    else { customerId = key; }
+  }
+  final file = await customerLedgerFileFromKey(customerId.isNotEmpty ? customerId : customerName);
+  final excel = Excel.createExcel();
+  const sheetName = 'LEDGER';
+  _ensureDefaultSheetRenamed(excel, sheetName);
+  final sheet = excel[sheetName];
+  final headers = <String>['DATE','TYPE','REFERENCE','NOTE','DEBIT','CREDIT','RUNNING BALANCE'];
+  sheet.appendRow(headers.map<CellValue?>((s) => TextCellValue(s)).toList());
+  _styleHeaderRow(sheet, headers);
+
+  final rows = <Map<String, dynamic>>[];
+  // Move opening balance (if any) to the very top of the ledger.
+  double openingBalance = 0.0;
+  DateTime? openingDate;
+  final openingEntries = <PaymentEntry>[];
+  pays.removeWhere((p) {
+    final isOpening = (p.note ?? '').toLowerCase().contains('opening balance');
+    if (isOpening) {
+      openingEntries.add(p);
+      openingBalance += p.effectiveAmount;
+      try {
+        final d = parseInvoiceDate(p.date);
+        if (openingDate == null || d.isBefore(openingDate!)) {
+          openingDate = d;
+        }
+      } catch (_) {}
+    }
+    return isOpening;
+  });
+  if (openingBalance.abs() > 0.0001) {
+    rows.add({
+      'date': openingDate ?? DateTime.now(),
+      'type': 'Opening',
+      'ref': 'Opening Balance',
+      'note': 'Opening Balance',
+      'debit': 0.0,
+      'credit': openingBalance,
+    });
+  }
+  for (final inv in invs) {
+    rows.add({
+      'date': parseInvoiceDate(inv.date),
+      'type': 'Sale',
+      'ref': 'Invoice ${inv.sNo}',
+      'note': _saleNote(inv),
+      'debit': inv.balance,
+      'credit': 0.0,
+    });
+  }
+  for (final p in pays) {
+    rows.add({
+      'date': parseInvoiceDate(p.date),
+      'type': 'Payment',
+      'ref': p.id,
+      'note': _ledgerNoteForPayment(p),
+      'debit': 0.0,
+      'credit': p.effectiveAmount,
+    });
+  }
+  rows.sort((a, b) => (a['date'] as DateTime).compareTo(b['date'] as DateTime));
+
+  double running = 0.0;
+  final dataRows = <List<dynamic>>[];
+  for (final r in rows) {
+    running += (r['debit'] as double) - (r['credit'] as double);
+    final row = [
+      dfDay.format(r['date'] as DateTime),
+      r['type'],
+      r['ref'],
+      r['note'] ?? '',
+      (r['debit'] as double).round(),
+      (r['credit'] as double).round(),
+      running.round(),
+    ];
+    const numericCols = {'DEBIT','CREDIT','RUNNING BALANCE'};
+    sheet.appendRow(_cellsFromRow(headers, row, numericCols));
+    dataRows.add(row);
+  }
+
+  _autoSizeColumns(sheet, [headers, ...dataRows.take(200)], 10);
+  _cleanupSheetsAndSetDefault(excel, sheetName);
+  await file.writeAsBytes(excel.encode()!, flush: true);
+  return file;
+}
+
+String _ledgerNoteForPayment(PaymentEntry e) {
+  final parts = <String>[];
+  if ((e.note ?? '').isNotEmpty) parts.add(e.note!);
+  if (e.type == PaymentType.cheque) {
+    if ((e.bank ?? '').isNotEmpty) parts.add(e.bank!);
+    if ((e.chequeNo ?? '').isNotEmpty) parts.add('Chq ${e.chequeNo}');
+  } else if (e.type == PaymentType.bank) {
+    if ((e.bankMode ?? '').isNotEmpty) parts.add(e.bankMode!);
+    if ((e.bank ?? '').isNotEmpty) parts.add(e.bank!);
+    if ((e.txnId ?? '').isNotEmpty) parts.add(e.txnId!);
+  }
+  if (e.discount.abs() > 0.0001) parts.add('Discount ${fmt0(e.discount)}');
+  if (parts.isEmpty) return paymentTypeLabel(e.type);
+  return '${paymentTypeLabel(e.type)} - ${parts.join(' / ')}';
+}
+
+String _saleNote(Invoice inv) {
+  final items = <String>[];
+  for (final line in inv.lines) {
+    if (line.qty > 0) {
+      items.add('${line.typeLabel} ${line.qty}');
+    }
+  }
+  final parts = <String>[];
+  if (items.isNotEmpty) parts.add('Items: ${items.join(', ')}');
+  final addr = inv.address.trim();
+  if (addr.isNotEmpty) parts.add('Address: $addr');
+  return parts.isEmpty ? '' : parts.join(' | ');
+}
+
+class _LedgerRow {
+  final DateTime date;
+  final String type;
+  final String customer;
+  final String ref;
+  final String note;
+  final double debit;
+  final double credit;
+  _LedgerRow({
+    required this.date,
+    required this.type,
+    required this.customer,
+    required this.ref,
+    required this.note,
+    required this.debit,
+    required this.credit,
+  });
+}
+
+Future<File> _writeLedgerExcel(List<_LedgerRow> rows, String sheetName, String dirPath, String fileName) async {
+  final excel = Excel.createExcel();
+  _ensureDefaultSheetRenamed(excel, sheetName);
+  final sheet = excel[sheetName];
+  final headers = <String>['DATE','TYPE','CUSTOMER','REFERENCE','NOTE','DEBIT','CREDIT','RUNNING BALANCE'];
+  sheet.appendRow(headers.map<CellValue?>((s) => TextCellValue(s)).toList());
+  _styleHeaderRow(sheet, headers);
+
+  rows.sort((a, b) {
+    final d = a.date.compareTo(b.date);
+    if (d != 0) return d;
+    return a.type.compareTo(b.type);
+  });
+
+  double running = 0.0;
+  final dataRows = <List<dynamic>>[];
+  for (final r in rows) {
+    running += (r.debit) - (r.credit);
+    final row = [
+      dfDay.format(r.date),
+      r.type,
+      r.customer,
+      r.ref,
+      r.note,
+      r.debit.round(),
+      r.credit.round(),
+      running.round(),
+    ];
+    const numericCols = {'DEBIT','CREDIT','RUNNING BALANCE'};
+    sheet.appendRow(_cellsFromRow(headers, row, numericCols));
+    dataRows.add(row);
+  }
+
+  _autoSizeColumns(sheet, [headers, ...dataRows.take(200)], 10);
+  _cleanupSheetsAndSetDefault(excel, sheetName);
+  final dir = Directory(dirPath);
+  if (!await dir.exists()) { await dir.create(recursive: true); }
+  final file = File('${dir.path}${Platform.pathSeparator}$fileName');
+  await file.writeAsBytes(excel.encode()!, flush: true);
+  return file;
+}
+
+Future<File> exportSurjaniLedger([List<SurjaniLedgerEntry>? preset]) async {
+  final rows = preset ?? await SurjaniLedgerStore.loadAll();
+  final excel = Excel.createExcel();
+  const sheetName = 'Surjani Ledger';
+  _ensureDefaultSheetRenamed(excel, sheetName);
+  final sheet = excel[sheetName];
+  final headers = <String>['DATE','SOURCE/PARTICULARS','QTY','RATE','DEBIT','CREDIT','BALANCE'];
+  sheet.appendRow(headers.map<CellValue?>((s) => TextCellValue(s)).toList());
+  _styleHeaderRow(sheet, headers);
+
+  rows.sort((a, b) {
+    final d = parseInvoiceDate(a.date).compareTo(parseInvoiceDate(b.date));
+    return d != 0 ? d : a.id.compareTo(b.id);
+  });
+
+  double running = 0.0;
+  final dataRows = <List<dynamic>>[];
+  for (final r in rows) {
+    running += (r.debit) - (r.credit);
+    final row = [
+      dfDay.format(parseInvoiceDate(r.date)),
+      r.particulars,
+      r.qty,
+      r.rate,
+      r.debit,
+      r.credit,
+      running,
+    ];
+    const numericCols = {'QTY','RATE','DEBIT','CREDIT','BALANCE'};
+    sheet.appendRow(_cellsFromRow(headers, row, numericCols));
+    dataRows.add(row);
+  }
+
+  _autoSizeColumns(sheet, [headers, ...dataRows.take(200)], 10);
+  _cleanupSheetsAndSetDefault(excel, sheetName);
+  final dir = await subdir('surjani');
+  final file = File('${dir.path}${Platform.pathSeparator}Surjani_Ledger.xlsx');
+  await file.writeAsBytes(excel.encode()!, flush: true);
+  return file;
+}
+
+Future<PaymentEntry> addPaymentForCustomer({
+  required String customerId,
+  required String customerName,
   required PaymentType type,
   required DateTime date,
-  required Map<int, double> invoiceToAmount,
+  required double amount,
+  double discount = 0.0,
   String? chequeNo,
   String? bank,
   String? txnId,
   String? bankMode,
-  PaymentStatus status = PaymentStatus.pending,
+  String? note,
 }) async {
-  final filtered = invoiceToAmount.entries.where((e) => (e.value) > 0.0).toList();
-  if (filtered.isEmpty) return [];
-  final invoices = await Store.loadAll();
-  String custOf(int sNo) { final i = invoices.firstWhere((x) => x.sNo == sNo, orElse: () => Invoice(sNo: sNo, date: formatInvoiceDate(date), customer: '', customerId: '', contact: '', address: '', lines: [], cartage: 0, paid: 0)); return i.customer; }
-  String invDateOf(int sNo) { final i = invoices.firstWhere((x) => x.sNo == sNo, orElse: () => Invoice(sNo: sNo, date: formatInvoiceDate(date), customer: '', customerId: '', contact: '', address: '', lines: [], cartage: 0, paid: 0)); return i.date; }
-  final groupId = await PaymentStore.nextGroupId(date); final batchId = await PaymentStore.nextBatchId(date); final ymd = formatInvoiceDate(date);
-  final entries = <PaymentEntry>[]; final existing = await PaymentStore.loadAll();
-  final effectiveStatus = (type == PaymentType.cash) ? PaymentStatus.cleared : status;
-  for (final e in filtered) {
-    final inv = invoices.firstWhere((x) => x.sNo == e.key, orElse: () => Invoice(sNo: e.key, date: formatInvoiceDate(date), customer: '', customerId: '', contact: '', address: '', lines: [], cartage: 0, paid: 0));
-    final allocated = existing.where((p) => p.invoiceNo == e.key && p.status != PaymentStatus.bounced).map((p) => p.amount).fold<double>(0.0, (s, a) => s + a);
-    final allowedRemaining = (inv.balance - allocated).clamp(0.0, double.infinity).toDouble();
-    if (e.value > allowedRemaining + 1e-6) { throw Exception('Amount exceeds remaining for invoice #${e.key}. Max allowed: ${fmt0(allowedRemaining)}'); }
-    entries.add(PaymentEntry(
-      id: '${DateTime.now().microsecondsSinceEpoch}-${e.key}',
-      date: ymd,
-      invoiceNo: e.key,
-      invoiceDate: invDateOf(e.key),
-      customer: custOf(e.key),
-      type: type,
-      amount: e.value,
-      chequeNo: chequeNo,
-      bank: bank,
-      txnId: txnId,
-      bankMode: bankMode,
-      status: effectiveStatus,
-      batchId: batchId,
-      groupId: groupId,
-    ));
-  }
-  await PaymentStore.addAll(entries);
+  final ymd = formatInvoiceDate(date);
+  final entry = PaymentEntry(
+    id: await PaymentStore.nextPaymentId(date),
+    date: ymd,
+    customerId: customerId,
+    customer: customerName,
+    type: type,
+    amount: amount,
+    discount: discount,
+    chequeNo: chequeNo,
+    bank: bank,
+    txnId: txnId,
+    bankMode: bankMode,
+    note: note,
+  );
+  await PaymentStore.add(entry);
   await syncInvoicesPaidFromPayments();
   await rebuildMonthlyPaymentsExcels(date);
-  try { await refreshReportsForInvoices(invoiceToAmount.keys.toSet()); } catch (_) {}
-  return entries;
+  try {
+    await refreshReportsForInvoices(<int>{});
+    try { await exportDailyLedger(date); } catch (_) {}
+    try { await exportMonthlyLedger(DateTime(date.year, date.month)); } catch (_) {}
+  } catch (_) {}
+  return entry;
+}
+
+Future<void> rebuildAllReportsLedgerBased() async {
+  final invoices = await Store.loadAll();
+  final payments = await PaymentStore.loadAll();
+  final dayKeys = <String>{};
+  final monthKeys = <String>{};
+  final customers = <String>{};
+  final payMonthKeys = <String>{};
+
+  for (final inv in invoices) {
+    try {
+      final d = parseInvoiceDate(inv.date);
+      dayKeys.add(formatInvoiceDate(d));
+      monthKeys.add(DateFormat('yyyy-MM').format(d));
+    } catch (_) {}
+    final key = (inv.customerId.isNotEmpty ? inv.customerId : inv.customer).trim();
+    if (key.isNotEmpty) customers.add(key);
+  }
+  for (final p in payments) {
+    try {
+      final d = parseInvoiceDate(p.date);
+      payMonthKeys.add(DateFormat('yyyy-MM').format(d));
+    } catch (_) {}
+    final key = (p.customerId.isNotEmpty ? p.customerId : p.customer).trim();
+    if (key.isNotEmpty) customers.add(key);
+  }
+
+  for (final d in dayKeys) {
+    try { await exportDailySalesExcel(parseInvoiceDate(d)); } catch (_) {}
+    try { await exportDailyLedger(parseInvoiceDate(d)); } catch (_) {}
+  }
+  for (final m in monthKeys) {
+    try { await exportMonthlySalesExcel(DateTime.parse('$m-01')); } catch (_) {}
+    try { await exportMonthlyLedger(DateTime.parse('$m-01')); } catch (_) {}
+  }
+  for (final c in customers) {
+    try { await rebuildCustomerWorkbookForKey(c); } catch (_) {}
+    try { await exportCustomerLedger(c); } catch (_) {}
+  }
+  for (final m in payMonthKeys) {
+    try { await rebuildMonthlyPaymentsExcels(DateTime.parse('$m-01')); } catch (_) {}
+  }
 }

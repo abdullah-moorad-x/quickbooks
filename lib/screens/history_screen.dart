@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:open_filex/open_filex.dart';
+import '../core/app_bus.dart';
 import '../models/invoice.dart';
 import '../services/paths.dart';
 import '../services/pdf_builder.dart';
@@ -10,6 +11,7 @@ import '../services/excel_service.dart';
 import '../utils/date.dart';
 import '../utils/format.dart';
 import '../utils/snackbar.dart';
+import 'invoice_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
@@ -24,7 +26,19 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
   @override bool get wantKeepAlive => true;
 
   @override
-  void initState() { super.initState(); _load(); _searchCtrl.addListener(_applyFilter); }
+  void initState() {
+    super.initState();
+    _load();
+    _searchCtrl.addListener(_applyFilter);
+    AppBus.dataTick.addListener(_load);
+  }
+
+  @override
+  void dispose() {
+    AppBus.dataTick.removeListener(_load);
+    _searchCtrl.dispose();
+    super.dispose();
+  }
 
   Future<void> _sendWhatsappForInvoice(Invoice inv) async {
     try {
@@ -38,7 +52,8 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
       if (digits.startsWith('0092')) { digits = digits.substring(2); }
       else if (digits.startsWith('0')) { digits = '92${digits.substring(1)}'; }
       else if (!digits.startsWith('92')) { digits = '92$digits'; }
-      final msg = 'Invoice #${inv.sNo}, Date ${inv.date}. Total Rs ${fmt0(inv.total)}, Cartage Rs ${fmt0(inv.cartage)}, Balance Rs ${fmt0(inv.balance)}. Thank you.';
+      final displayName = (inv.customerDisplay ?? inv.customer).trim();
+      final msg = 'Invoice #${inv.sNo} for $displayName, Date ${inv.date}. Total Rs ${fmt0(inv.total)}, Cartage Rs ${fmt0(inv.cartage)}, Balance Rs ${fmt0(inv.balance)}. Thank you.';
       final url = 'https://wa.me/$digits?text=${Uri.encodeComponent(msg)}';
       if (Platform.isWindows) { try { final esc = pdfFile.path.replaceAll("'", "''"); await Process.run('powershell', ['-NoProfile', '-Command', "Set-Clipboard -Path '$esc'"]); } catch (_) {} }
       try { await OpenFilex.open(url); } catch (_) { if (Platform.isWindows) { try { await Process.run('cmd', ['/c', 'start', url]); } catch (_) {} } }
@@ -58,8 +73,36 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
     final query = _searchCtrl.text.toLowerCase();
     setState(() {
       if (query.isEmpty) { _filtered = _all; }
-      else { _filtered = _all.where((inv) => inv.customer.toLowerCase().contains(query) || inv.sNo.toString().contains(query)).toList(); }
+      else {
+        _filtered = _all.where((inv) {
+          final addr = inv.address.toLowerCase();
+          return inv.customer.toLowerCase().contains(query)
+              || inv.sNo.toString().contains(query)
+              || addr.contains(query);
+        }).toList();
+      }
     });
+  }
+
+  String _itemSummary(Invoice inv) {
+    final items = summarizeInvoiceLines(inv.lines)
+        .where((l) => l.qty > 0)
+        .map((l) => '${l.typeLabel} ${l.qty}')
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    return items.join('  |  ');
+  }
+
+  Future<void> _editInvoice(Invoice inv) async {
+    final updated = await Navigator.of(context).push<Invoice?>(MaterialPageRoute(
+      builder: (_) => InvoiceScreen(editing: true, initialInvoice: inv),
+    ));
+    if (updated != null) {
+      await _load();
+      if (!mounted) return;
+      // ignore: use_build_context_synchronously
+      showOk(context, 'Invoice #${updated.sNo} updated');
+    }
   }
 
   @override
@@ -67,7 +110,7 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
     super.build(context);
     if (_all.isEmpty) return const Center(child: Text('No invoices yet'));
     return Column(children: [
-      Padding(padding: const EdgeInsets.fromLTRB(12, 8, 12, 4), child: TextField(controller: _searchCtrl, decoration: InputDecoration(hintText: 'Search by name, or invoice #...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white, contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12))),),
+      Padding(padding: const EdgeInsets.fromLTRB(12, 8, 12, 4), child: TextField(controller: _searchCtrl, decoration: InputDecoration(hintText: 'Search by name, invoice #, or address...', prefixIcon: const Icon(Icons.search), border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)), filled: true, fillColor: Colors.white, contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12))),),
       Expanded(child: ListView.builder(physics: const ClampingScrollPhysics(), itemCount: _filtered.length, itemBuilder: (_, i) {
         final inv = _filtered[i];
         return Card(child: ListTile(
@@ -76,7 +119,16 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
             final nameWithAddr = addr.isNotEmpty ? '#${inv.sNo}  ${inv.customer}  -  $addr' : '#${inv.sNo}  ${inv.customer}';
             return Text(nameWithAddr, overflow: TextOverflow.ellipsis);
           }),
-          subtitle: Text('${inv.date}  |  Cartage: ${inv.cartage.toStringAsFixed(0)}  |  Bal: ${inv.balance.toStringAsFixed(0)}  |  Paid: ${inv.paid.toStringAsFixed(0)}  |  Rem: ${inv.remaining.toStringAsFixed(0)}'),
+          subtitle: Builder(builder: (_) {
+            final items = _itemSummary(inv);
+            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${inv.date}  |  Cartage: ${inv.cartage.toStringAsFixed(0)}  |  Bal: ${inv.balance.toStringAsFixed(0)}  |  Paid: ${inv.paid.toStringAsFixed(0)}  |  Rem: ${inv.remaining.toStringAsFixed(0)}'),
+              if (items.isNotEmpty) Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(items, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w500)),
+              ),
+            ]);
+          }),
           trailing: Row(mainAxisSize: MainAxisSize.min, children: [
             IconButton(tooltip: 'PDF', icon: const Icon(Icons.picture_as_pdf), onPressed: () async {
               final bytes = await PdfBuilder.build(inv);
@@ -90,6 +142,11 @@ class _HistoryScreenState extends State<HistoryScreen> with AutomaticKeepAliveCl
             }),
             const SizedBox(width: 6),
             IconButton(tooltip: 'WhatsApp', icon: const FaIcon(FontAwesomeIcons.whatsapp, color: Color(0xFF25D366)), onPressed: () => _sendWhatsappForInvoice(inv)),
+            IconButton(
+              tooltip: 'Edit',
+              icon: const Icon(Icons.edit_outlined, color: Colors.black87),
+              onPressed: () => _editInvoice(inv),
+            ),
             IconButton(
               tooltip: 'Delete',
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),

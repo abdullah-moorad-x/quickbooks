@@ -8,7 +8,7 @@ void main() async {
 
   const opts = WindowOptions(
     size: Size(1000, 700),
-    minimumSize: Size(1000, 700),
+    minimumSize: Size(400, 300),
     center: true,
     titleBarStyle: TitleBarStyle.hidden,
   );
@@ -20,4 +20,3 @@ void main() async {
 
   runApp(const App());
 }
-
