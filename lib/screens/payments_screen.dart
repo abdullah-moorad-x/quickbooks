@@ -297,6 +297,10 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                         onPressed: _rebuildAllReports,
                         icon: const Icon(Icons.refresh),
                         label: const Text('Rebuild All Reports')),
+                    OutlinedButton.icon(
+                        onPressed: _copyAllDuesToClipboard,
+                        icon: const Icon(Icons.copy),
+                        label: const Text('Copy All Dues')),
                   ],
                 ),
               ),
@@ -348,6 +352,23 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       if (!mounted) return;
       showErr(context, 'Failed to rebuild: $err');
     }
+  }
+
+  Future<void> _copyAllDuesToClipboard() async {
+    final dueRows = _rows.where((r) => r.net > 1e-6).toList()
+      ..sort((a, b) => b.net.compareTo(a.net));
+    if (dueRows.isEmpty) {
+      showOk(context, 'No client dues to copy');
+      return;
+    }
+    final lines = <String>[];
+    for (final row in dueRows) {
+      final title = row.id.trim().isEmpty ? row.name : '${row.name} (${row.id})';
+      lines.add('$title: ${fmt0(row.net)}');
+    }
+    await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+    if (!mounted) return;
+    showOk(context, 'Copied dues for ${dueRows.length} clients');
   }
 
   Future<void> _openCustomerDetail(_KhataRow row) async {
