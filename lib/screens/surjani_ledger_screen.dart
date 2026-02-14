@@ -1,7 +1,4 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
 
 import '../services/surjani_ledger_store.dart';
@@ -17,7 +14,7 @@ class SurjaniLedgerScreen extends StatefulWidget {
 }
 
 class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with AutomaticKeepAliveClientMixin {
-  final _dateCtrl = TextEditingController(text: DateFormat('yyyy-MM-dd').format(DateTime.now()));
+  final _dateCtrl = TextEditingController(text: formatInvoiceDate(DateTime.now()));
   final _partCtrl = TextEditingController();
   final _qtyCtrl = TextEditingController(text: '0');
   final _rateCtrl = TextEditingController(text: '0');
@@ -25,10 +22,12 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
   final _creditCtrl = TextEditingController(text: '0');
   final _noteCtrl = TextEditingController();
   final _openingCtrl = TextEditingController(text: '0');
-  final _openingDateCtrl = TextEditingController(text: DateFormat('yyyy-MM-dd').format(DateTime.now()));
+  final _openingDateCtrl = TextEditingController(text: formatInvoiceDate(DateTime.now()));
   bool _autoDebit = true;
   bool _loading = true;
   List<SurjaniLedgerEntry> _rows = [];
+  List<String> _particularSuggestions = [];
+  final FocusNode _partFocus = FocusNode();
 
   @override
   void initState() {
@@ -49,6 +48,7 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
     _noteCtrl.dispose();
     _openingCtrl.dispose();
     _openingDateCtrl.dispose();
+    _partFocus.dispose();
     super.dispose();
   }
 
@@ -57,8 +57,17 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
 
   Future<void> _load() async {
     final list = await SurjaniLedgerStore.loadAll();
+    final seen = <String>{};
+    final suggestions = <String>[];
+    for (final e in list.reversed) {
+      final p = e.particulars.trim();
+      if (p.isEmpty || p.toLowerCase() == 'opening balance') continue;
+      final key = p.toLowerCase();
+      if (seen.add(key)) suggestions.add(p);
+    }
     setState(() {
       _rows = list;
+      _particularSuggestions = suggestions;
       _loading = false;
       _openingCtrl.text = _openingBalance().toStringAsFixed(0);
       _openingDateCtrl.text = _openingDate();
@@ -76,9 +85,13 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
 
   String _openingDate() {
     if (_rows.isNotEmpty && _rows.first.particulars.toLowerCase() == 'opening balance') {
-      return _rows.first.date;
+      try {
+        return formatInvoiceDate(parseInvoiceDate(_rows.first.date));
+      } catch (_) {
+        return _rows.first.date;
+      }
     }
-    return DateFormat('yyyy-MM-dd').format(DateTime.now());
+    return formatInvoiceDate(DateTime.now());
   }
 
   double _parseDouble(TextEditingController c) => double.tryParse(c.text.replaceAll(',', '')) ?? 0.0;
@@ -95,19 +108,19 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
     final first = DateTime(2000, 1, 1);
     final picked = await showDatePicker(
       context: context,
-      initialDate: _clampDate(parseInvoiceDate(_dateCtrl.text.isNotEmpty ? _dateCtrl.text : DateFormat('yyyy-MM-dd').format(now)), first),
+      initialDate: _clampDate(parseInvoiceDate(_dateCtrl.text.isNotEmpty ? _dateCtrl.text : formatInvoiceDate(now)), first),
       firstDate: first,
       lastDate: DateTime(now.year + 5),
     );
     if (picked != null) {
-      _dateCtrl.text = DateFormat('yyyy-MM-dd').format(picked);
+      _dateCtrl.text = formatInvoiceDate(picked);
     }
   }
 
   Future<void> _saveOpening() async {
     final opening = _parseDouble(_openingCtrl);
     final openingDate = _openingDateCtrl.text.trim().isEmpty
-        ? DateFormat('yyyy-MM-dd').format(DateTime.now())
+        ? formatInvoiceDate(DateTime.now())
         : _openingDateCtrl.text.trim();
     final others = _rows.where((e) => e.particulars.toLowerCase() != 'opening balance').toList();
     if (opening.abs() < 0.0001) {
@@ -185,6 +198,159 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
       await SurjaniLedgerStore.clearAll();
       await _load();
     }
+  }
+
+  bool _isOpeningEntry(SurjaniLedgerEntry e) =>
+      e.id == 'SL-OPEN' || e.particulars.toLowerCase() == 'opening balance';
+
+  Future<void> _editEntry(SurjaniLedgerEntry e) async {
+    if (_isOpeningEntry(e)) {
+      if (!mounted) return;
+      showErr(context, 'Edit opening balance from the Opening Balance section');
+      return;
+    }
+
+    String editDate = e.date;
+    try {
+      editDate = formatInvoiceDate(parseInvoiceDate(e.date));
+    } catch (_) {}
+    final dateCtrl = TextEditingController(text: editDate);
+    final partCtrl = TextEditingController(text: e.particulars);
+    final qtyCtrl = TextEditingController(text: e.qty.toStringAsFixed(2));
+    final rateCtrl = TextEditingController(text: e.rate.toStringAsFixed(2));
+    final debitCtrl = TextEditingController(text: e.debit.toStringAsFixed(0));
+    final creditCtrl = TextEditingController(text: e.credit.toStringAsFixed(0));
+    final noteCtrl = TextEditingController(text: e.note ?? '');
+    final partFocus = FocusNode();
+    bool autoDebit = (e.debit - (e.qty * e.rate)).abs() < 0.0001;
+
+    void maybeAutoDebit() {
+      if (!autoDebit) return;
+      final q = double.tryParse(qtyCtrl.text.replaceAll(',', '')) ?? 0.0;
+      final r = double.tryParse(rateCtrl.text.replaceAll(',', '')) ?? 0.0;
+      debitCtrl.text = (q * r).toStringAsFixed(0);
+    }
+
+    qtyCtrl.addListener(maybeAutoDebit);
+    rateCtrl.addListener(maybeAutoDebit);
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Edit Surjani Entry'),
+          content: SizedBox(
+            width: 860,
+            child: SingleChildScrollView(
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.end,
+                children: [
+                  SizedBox(
+                    width: 150,
+                    child: TextField(
+                      controller: dateCtrl,
+                      readOnly: true,
+                      onTap: () async {
+                        final now = DateTime.now();
+                        final first = DateTime(2000, 1, 1);
+                        final picked = await showDatePicker(
+                          context: ctx,
+                          initialDate: _clampDate(parseInvoiceDate(dateCtrl.text.isNotEmpty ? dateCtrl.text : formatInvoiceDate(now)), first),
+                          firstDate: first,
+                          lastDate: DateTime(now.year + 5),
+                        );
+                        if (picked != null) {
+                          dateCtrl.text = formatInvoiceDate(picked);
+                        }
+                      },
+                      decoration: const InputDecoration(
+                        labelText: 'Date',
+                        suffixIcon: Icon(Icons.calendar_today, size: 18),
+                      ),
+                    ),
+                  ),
+                  _particularField(partCtrl, focusNode: partFocus, width: 260),
+                  _numberField(qtyCtrl, 'Qty', width: 90),
+                  _numberField(rateCtrl, 'Rate', width: 90),
+                  _numberField(debitCtrl, 'Debit', width: 110),
+                  _numberField(creditCtrl, 'Credit', width: 110),
+                  _textField(noteCtrl, 'Note', width: 200),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Checkbox(
+                        value: autoDebit,
+                        onChanged: (v) => setDialogState(() {
+                          autoDebit = v ?? true;
+                          maybeAutoDebit();
+                        }),
+                      ),
+                      const Text('Auto debit = qty x rate'),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+
+    if (ok == true) {
+      final dateStr = dateCtrl.text.trim();
+      final particulars = partCtrl.text.trim();
+      if (dateStr.isEmpty || particulars.isEmpty) {
+        if (!mounted) return;
+        showErr(context, 'Date and particulars are required');
+      } else {
+        final updated = e.copyWith(
+          date: dateStr,
+          particulars: particulars,
+          qty: double.tryParse(qtyCtrl.text.replaceAll(',', '')) ?? 0,
+          rate: double.tryParse(rateCtrl.text.replaceAll(',', '')) ?? 0,
+          debit: double.tryParse(debitCtrl.text.replaceAll(',', '')) ?? 0,
+          credit: double.tryParse(creditCtrl.text.replaceAll(',', '')) ?? 0,
+          note: noteCtrl.text.trim().isEmpty ? null : noteCtrl.text.trim(),
+        );
+        await SurjaniLedgerStore.upsert(updated);
+        await _load();
+      }
+    }
+
+    qtyCtrl.removeListener(maybeAutoDebit);
+    rateCtrl.removeListener(maybeAutoDebit);
+    dateCtrl.dispose();
+    partCtrl.dispose();
+    qtyCtrl.dispose();
+    rateCtrl.dispose();
+    debitCtrl.dispose();
+    creditCtrl.dispose();
+    noteCtrl.dispose();
+    partFocus.dispose();
+  }
+
+  Future<void> _deleteEntry(SurjaniLedgerEntry e) async {
+    final label = e.particulars.trim().isEmpty ? e.id : e.particulars;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete Entry'),
+        content: Text('Delete "$label"?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await SurjaniLedgerStore.delete(e.id);
+    await _load();
   }
 
   double _runningBalanceAt(int idx) {
@@ -277,12 +443,12 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
     final first = DateTime(2000, 1, 1);
     final picked = await showDatePicker(
       context: context,
-      initialDate: _clampDate(parseInvoiceDate(controller.text.isNotEmpty ? controller.text : DateFormat('yyyy-MM-dd').format(now)), first),
+      initialDate: _clampDate(parseInvoiceDate(controller.text.isNotEmpty ? controller.text : formatInvoiceDate(now)), first),
       firstDate: first,
       lastDate: DateTime(now.year + 5),
     );
     if (picked != null) {
-      controller.text = DateFormat('yyyy-MM-dd').format(picked);
+      controller.text = formatInvoiceDate(picked);
     }
   }
 
@@ -301,7 +467,7 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
           crossAxisAlignment: WrapCrossAlignment.end,
           children: [
             _dateField(),
-            _textField(_partCtrl, 'Source / Particulars', width: 260),
+            _particularField(_partCtrl, focusNode: _partFocus, width: 260),
             _numberField(_qtyCtrl, 'Qty', width: 90),
             _numberField(_rateCtrl, 'Rate', width: 90),
             _numberField(_debitCtrl, 'Debit', width: 110),
@@ -362,7 +528,57 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
   Widget _chip(String label, double value) {
     return Chip(
       label: Text('$label: ${value.toStringAsFixed(0)}'),
-      backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.08),
+      backgroundColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.08),
+    );
+  }
+
+  Widget _particularField(TextEditingController c, {required FocusNode focusNode, double width = 260}) {
+    return SizedBox(
+      width: width,
+      child: RawAutocomplete<String>(
+        textEditingController: c,
+        focusNode: focusNode,
+        optionsBuilder: (textEditingValue) {
+          final q = textEditingValue.text.trim().toLowerCase();
+          if (q.isEmpty) return const Iterable<String>.empty();
+          return _particularSuggestions.where((s) => s.toLowerCase().contains(q));
+        },
+        onSelected: (v) => c.text = v,
+        fieldViewBuilder: (context, controller, node, onFieldSubmitted) {
+          return TextField(
+            controller: controller,
+            focusNode: node,
+            decoration: const InputDecoration(labelText: 'Source / Particulars'),
+            onSubmitted: (_) => onFieldSubmitted(),
+          );
+        },
+        optionsViewBuilder: (context, onSelected, options) {
+          if (options.isEmpty) return const SizedBox.shrink();
+          return Align(
+            alignment: Alignment.topLeft,
+            child: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(8),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220, maxWidth: 320),
+                child: ListView.builder(
+                  padding: EdgeInsets.zero,
+                  shrinkWrap: true,
+                  itemCount: options.length,
+                  itemBuilder: (context, index) {
+                    final option = options.elementAt(index);
+                    return ListTile(
+                      dense: true,
+                      title: Text(option),
+                      onTap: () => onSelected(option),
+                    );
+                  },
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -383,6 +599,7 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
             DataColumn(label: Text('Credit')),
             DataColumn(label: Text('Balance')),
             DataColumn(label: Text('Note')),
+            DataColumn(label: Text('Actions')),
           ],
           rows: [
             for (int i = 0; i < _rows.length; i++)
@@ -394,9 +611,13 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
   }
 
   DataRow _buildRow(SurjaniLedgerEntry e, double running) {
+    String displayDate = e.date;
+    try {
+      displayDate = formatInvoiceDate(parseInvoiceDate(e.date));
+    } catch (_) {}
     return DataRow(
       cells: [
-        DataCell(Text(e.date)),
+        DataCell(Text(displayDate)),
         DataCell(Text(e.particulars)),
         DataCell(Text(e.qty.toStringAsFixed(2))),
         DataCell(Text(e.rate.toStringAsFixed(2))),
@@ -404,6 +625,25 @@ class _SurjaniLedgerScreenState extends State<SurjaniLedgerScreen> with Automati
         DataCell(Text(e.credit.toStringAsFixed(0))),
         DataCell(Text(running.toStringAsFixed(0))),
         DataCell(Text(e.note ?? '')),
+        DataCell(
+          _isOpeningEntry(e)
+              ? const Text('-')
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Edit entry',
+                      icon: const Icon(Icons.edit, size: 18),
+                      onPressed: () => _editEntry(e),
+                    ),
+                    IconButton(
+                      tooltip: 'Delete entry',
+                      icon: const Icon(Icons.delete_outline, size: 18, color: Color(0xFFB71C1C)),
+                      onPressed: () => _deleteEntry(e),
+                    ),
+                  ],
+                ),
+        ),
       ],
     );
   }
