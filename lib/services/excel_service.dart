@@ -983,7 +983,7 @@ Future<File> exportMonthlyProfitLossExcel([DateTime? month]) async {
         monthEntries.fold<double>(0.0, (sum, entry) => sum + entry.debit);
     final credit =
         monthEntries.fold<double>(0.0, (sum, entry) => sum + entry.credit);
-    final net = debit - credit;
+    final pnlExpense = credit;
     expenseDebit += debit;
     expenseCredit += credit;
 
@@ -992,7 +992,7 @@ Future<File> exportMonthlyProfitLossExcel([DateTime? month]) async {
       monthEntries.length,
       debit,
       credit,
-      net,
+      pnlExpense,
     ]);
 
     for (final entry in monthEntries) {
@@ -1020,8 +1020,8 @@ Future<File> exportMonthlyProfitLossExcel([DateTime? month]) async {
     return a[2].toString().compareTo(b[2].toString());
   });
 
-  final netExpense = expenseDebit - expenseCredit;
-  final profitOrLoss = grossSales - netExpense;
+  final ledgerCreditExpenses = expenseCredit;
+  final profitOrLoss = grossSales - ledgerCreditExpenses;
 
   final excel = Excel.createExcel();
 
@@ -1038,9 +1038,8 @@ Future<File> exportMonthlyProfitLossExcel([DateTime? month]) async {
     ['Invoice Sales', salesTotal],
     ['Cartage', cartageTotal],
     ['Gross Sales', grossSales],
-    ['Ledger Debit (Spend)', expenseDebit],
-    ['Ledger Credit', expenseCredit],
-    ['Net Expense', netExpense],
+    ['Ledger Debit', expenseDebit],
+    ['Ledger Credit Expenses', ledgerCreditExpenses],
     ['Profit / Loss', profitOrLoss],
   ];
   for (final row in summaryRows) {
@@ -1087,14 +1086,14 @@ Future<File> exportMonthlyProfitLossExcel([DateTime? month]) async {
     'ENTRIES',
     'DEBIT',
     'CREDIT',
-    'NET EXPENSE',
+    'P&L EXPENSE',
   ];
   ledgerSummarySheet.appendRow(
     ledgerSummaryHeaders.map<CellValue?>((s) => TextCellValue(s)).toList(),
   );
   _styleHeaderRow(ledgerSummarySheet, ledgerSummaryHeaders);
   for (final row in ledgerSummaryRows) {
-    const numericCols = {'ENTRIES', 'DEBIT', 'CREDIT', 'NET EXPENSE'};
+    const numericCols = {'ENTRIES', 'DEBIT', 'CREDIT', 'P&L EXPENSE'};
     ledgerSummarySheet.appendRow(
       _cellsFromRow(ledgerSummaryHeaders, row, numericCols),
     );
