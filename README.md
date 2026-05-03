@@ -30,12 +30,12 @@ flutter build windows # adjust for macos/linux
 Use the helper script to bump version, build the installer, commit, push, and push the release tag:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\prepare_release.ps1 -Version 1.0.3
+powershell -ExecutionPolicy Bypass -File tools\prepare_release.ps1 -Version 1.0.4
 ```
 
 Optional:
-- `-BuildNumber 4`
-- `-CommitMessage "Release v1.0.3"`
+- `-BuildNumber 5`
+- `-CommitMessage "Release v1.0.4"`
 
 After the script finishes, create a GitHub Release for the new tag and upload:
 - `dist\QuickBill_By_Abdullah_Installer.exe`
