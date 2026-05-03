@@ -7,36 +7,55 @@ import 'package:open_filex/open_filex.dart';
 import '../core/app_bus.dart';
 import '../core/enums.dart';
 import '../models/customer.dart';
-import '../models/invoice.dart';
+import '../models/mobile_access.dart';
 import '../models/payment.dart';
 import '../services/excel_service.dart';
+import '../services/mobile_sync_store.dart';
+import '../services/server_sync_client.dart';
+import '../services/slip_ocr_service.dart';
 import '../services/storage.dart';
 import '../services/paths.dart';
 import '../utils/date.dart';
 import '../utils/format.dart';
 import '../utils/snackbar.dart';
+import '../widgets/app_panels.dart';
 
 class PaymentsScreen extends StatefulWidget {
-  const PaymentsScreen({super.key});
+  final bool readOnly;
+  final Future<void> Function()? onRefresh;
+  final AppUser? mobileUser;
+
+  const PaymentsScreen({
+    super.key,
+    this.readOnly = false,
+    this.onRefresh,
+    this.mobileUser,
+  });
   @override
   State<PaymentsScreen> createState() => _PaymentsScreenState();
 }
 
-class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAliveClientMixin {
+class _PaymentsScreenState extends State<PaymentsScreen>
+    with AutomaticKeepAliveClientMixin {
   final TextEditingController _q = TextEditingController();
   SortMode _sortPayments = SortMode.mostUnpaid;
-  final FocusNode _sortFocusPayments = FocusNode(skipTraversal: true, canRequestFocus: false);
+  final FocusNode _sortFocusPayments =
+      FocusNode(skipTraversal: true, canRequestFocus: false);
   final Map<String, _AddPaymentFormState> _forms = {};
 
   List<_KhataRow> _rows = [];
+  List<_KhataRow> _filteredRows = [];
   Map<String, List<PaymentEntry>> _ledgerByCustomer = {};
   List<String> _noteSuggestions = [];
+  double _totalCustomersOwe = 0;
+  int _owingCustomerCount = 0;
 
   @override
   void initState() {
     super.initState();
     _load();
     AppBus.dataTick.addListener(_onDataTick);
+    _q.addListener(_applyFilterAndSort);
   }
 
   void _onDataTick() {
@@ -47,6 +66,7 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
 
   @override
   void dispose() {
+    _q.removeListener(_applyFilterAndSort);
     _q.dispose();
     _sortFocusPayments.dispose();
     for (final f in _forms.values) {
@@ -65,7 +85,13 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     final ledger = await PaymentStore.loadAll();
     final customers = await CustomerStore.loadAll();
     final activeCustomers = customers.where((c) => c.active).toList();
-    final inactiveKeys = customers.where((c) => !c.active).map((c) => _customerKey(c.id, c.name)).toSet();
+    final activeCustomerByKey = <String, Customer>{
+      for (final c in activeCustomers) _customerKey(c.id, c.name): c,
+    };
+    final inactiveKeys = customers
+        .where((c) => !c.active)
+        .map((c) => _customerKey(c.id, c.name))
+        .toSet();
 
     final ledgerByCustomer = <String, List<PaymentEntry>>{};
     for (final p in ledger) {
@@ -84,18 +110,10 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       }
     }
     for (final list in ledgerByCustomer.values) {
-      list.sort((a, b) => a.date.compareTo(b.date));
+      list.sort(_comparePaymentEntryByDate);
     }
 
     final rowBuilders = <String, _KhataRowBuilder>{};
-    Customer? findCustomer(String key) {
-      try {
-        return activeCustomers.firstWhere((c) => _customerKey(c.id, c.name) == key);
-      } catch (_) {
-        return null;
-      }
-    }
-
     for (final inv in invoices) {
       if (inv.walkIn) continue;
       final key = _customerKey(inv.customerId, inv.customer);
@@ -104,7 +122,8 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       existing.name ??= inv.customer;
       existing.id ??= inv.customerId;
       existing.sales += inv.balance;
-      existing.lastSale = _maxDate(existing.lastSale, parseInvoiceDate(inv.date));
+      existing.lastSale =
+          _maxDate(existing.lastSale, parseInvoiceDate(inv.date));
     }
 
     for (final p in ledger) {
@@ -114,16 +133,17 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       existing.name ??= p.customer;
       existing.id ??= p.customerId;
       existing.payments += p.effectiveAmount;
-      existing.lastPayment = _maxDate(existing.lastPayment, parseInvoiceDate(p.date));
+      existing.lastPayment =
+          _maxDate(existing.lastPayment, parseInvoiceDate(p.date));
     }
 
     // Fill contact info from customer master
     for (final entry in rowBuilders.entries) {
-      final cust = findCustomer(entry.key);
+      final cust = activeCustomerByKey[entry.key];
       if (cust != null) {
-        entry.value.name ??= cust.name;
-        entry.value.id ??= cust.id;
-        entry.value.contact ??= cust.contact;
+        entry.value.name = cust.name;
+        entry.value.id = cust.id;
+        entry.value.contact = cust.contact;
       }
     }
 
@@ -153,9 +173,62 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     if (!mounted) return;
     setState(() {
       _rows = rows;
+      _filteredRows = _filterAndSortRows(rows);
       _ledgerByCustomer = ledgerByCustomer;
       _noteSuggestions = noteSuggestions;
+      _totalCustomersOwe = rows
+          .where((row) => row.net > 0)
+          .fold<double>(0, (sum, row) => sum + row.net);
+      _owingCustomerCount = rows.where((row) => row.net > 0).length;
     });
+  }
+
+  List<_KhataRow> _filterAndSortRows(List<_KhataRow> source) {
+    final q = _q.text.trim().toLowerCase();
+    final filtered = source.where((row) {
+      if (q.isEmpty) return true;
+      final byName = row.name.toLowerCase().contains(q);
+      final byId = row.id.toLowerCase().contains(q);
+      return byName || byId;
+    }).toList();
+
+    switch (_sortPayments) {
+      case SortMode.mostUnpaid:
+        filtered.sort((a, b) => b.net.compareTo(a.net));
+        break;
+      case SortMode.mostPaid:
+        filtered.sort((a, b) => a.net.compareTo(b.net));
+        break;
+      case SortMode.newestFirst:
+        filtered.sort((a, b) => (b.lastActivity ?? DateTime(1900))
+            .compareTo(a.lastActivity ?? DateTime(1900)));
+        break;
+      case SortMode.oldestFirst:
+        filtered.sort((a, b) => (a.lastActivity ?? DateTime(1900))
+            .compareTo(b.lastActivity ?? DateTime(1900)));
+        break;
+      case SortMode.mostSales:
+      case SortMode.leastSales:
+        break;
+    }
+    return filtered;
+  }
+
+  void _applyFilterAndSort() {
+    if (!mounted) return;
+    setState(() {
+      _filteredRows = _filterAndSortRows(_rows);
+    });
+  }
+
+  Future<void> _refresh() async {
+    try {
+      await widget.onRefresh?.call();
+    } catch (e) {
+      if (!mounted) return;
+      showErr(context, e.toString());
+    }
+    await _load();
   }
 
   DateTime? _maxDate(DateTime? a, DateTime b) {
@@ -169,7 +242,8 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     return a.isAfter(b) ? a : b;
   }
 
-  String _customerKey(String id, String name) => (id.trim().isNotEmpty ? id : name).trim().toLowerCase();
+  String _customerKey(String id, String name) =>
+      (id.trim().isNotEmpty ? id : name).trim().toLowerCase();
 
   // Open payments subfolders from UI
   Future<void> _openPaymentDir(String leaf) async {
@@ -189,81 +263,74 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    if (_rows.isEmpty) return const Center(child: Text('No customers yet'));
-    final isDesktop = !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
-    final q = _q.text.trim().toLowerCase();
-    var filtered = _rows.where((row) {
-      if (q.isEmpty) return true;
-      final byName = row.name.toLowerCase().contains(q);
-      final byId = row.id.toLowerCase().contains(q);
-      return byName || byId;
-    }).toList();
-
-    switch (_sortPayments) {
-      case SortMode.mostUnpaid:
-        filtered.sort((a, b) => b.net.compareTo(a.net));
-        break;
-      case SortMode.mostPaid:
-        filtered.sort((a, b) => a.net.compareTo(b.net));
-        break;
-      case SortMode.newestFirst:
-        filtered.sort((a, b) => (b.lastActivity ?? DateTime(1900)).compareTo(a.lastActivity ?? DateTime(1900)));
-        break;
-      case SortMode.oldestFirst:
-        filtered.sort((a, b) => (a.lastActivity ?? DateTime(1900)).compareTo(b.lastActivity ?? DateTime(1900)));
-        break;
-      case SortMode.mostSales:
-      case SortMode.leastSales:
-        break;
+    final isDesktop =
+        !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+    if (_rows.isEmpty) {
+      if (widget.onRefresh == null || isDesktop) {
+        return const Center(child: Text('No customers yet'));
+      }
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 220),
+            Center(child: Text('No customers yet')),
+          ],
+        ),
+      );
     }
-
     final listView = ListView.builder(
       physics: const ClampingScrollPhysics(),
-      itemCount: filtered.length,
+      itemCount: _filteredRows.length,
       itemBuilder: (_, i) {
-        final row = filtered[i];
-        final Color cardBg = row.net > 1e-6
-            ? const Color(0xFFFFEBEE)
-            : const Color(0xFFE8F5E9); // both credit and settled shown in green
-
-        return Card(
-          color: cardBg,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
+        final row = _filteredRows[i];
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: AppSoftCard(
+            backgroundColor: _customerCardTint(row.net),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        row.displayTitle,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Text(_activityLabel(row), style: const TextStyle(color: Colors.black54)),
-                  ],
+                AppSectionTitle(
+                  title: row.displayTitle,
+                  subtitle: _activityLabel(row),
+                  trailing: _netBadge(row.net),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 12),
                 Wrap(
-                  spacing: 16,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 10,
+                  runSpacing: 10,
                   children: [
-                    _kv('Sales', row.sales),
-                    _kv('Payments', row.payments),
-                    _kv('Net (Plus)', row.net),
-                    _netBadge(row.net),
-                    if (row.contact.isNotEmpty) Text('Contact: ${row.contact}'),
-                    TextButton.icon(
-                      onPressed: () => _openCustomerDetail(row),
-                      icon: const Icon(Icons.open_in_new),
-                      label: const Text('Open'),
+                    AppMetaChip(
+                      icon: Icons.trending_up_outlined,
+                      text: 'Sales ${fmt0(row.sales)}',
                     ),
+                    AppMetaChip(
+                      icon: Icons.payments_outlined,
+                      text: 'Payments ${fmt0(row.payments)}',
+                    ),
+                    AppMetaChip(
+                      icon: Icons.account_balance_wallet_outlined,
+                      text: 'Net ${fmt0(row.net)}',
+                    ),
+                    if (row.contact.isNotEmpty)
+                      AppMetaChip(
+                        icon: Icons.phone_outlined,
+                        text: row.contact,
+                      ),
                   ],
                 ),
-                const Divider(height: 24),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.tonalIcon(
+                    style: appGreenButtonStyle(context),
+                    onPressed: () => _openCustomerDetail(row),
+                    icon: const Icon(Icons.open_in_new, size: 18),
+                    label: const Text('Open Payment View'),
+                  ),
+                ),
               ],
             ),
           ),
@@ -273,51 +340,92 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
 
     return Column(
       children: [
-        // Quick access to monthly payment exports folders
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                AppMetaChip(
+                  icon: Icons.account_balance_wallet_outlined,
+                  text: 'Customers owe Rs ${fmt0(_totalCustomersOwe)}',
+                  backgroundColor: const Color(0xFFFFF7E8),
+                  borderColor: const Color(0xFFFFDCA8),
+                  foregroundColor: const Color(0xFF9A5A00),
+                ),
+                AppMetaChip(
+                  icon: Icons.people_alt_outlined,
+                  text: '$_owingCustomerCount customers',
+                  backgroundColor: const Color(0xFFF8FAFC),
+                  borderColor: const Color(0xFFDCE5EE),
+                  foregroundColor: const Color(0xFF273247),
+                ),
+              ],
+            ),
+          ),
+        ),
+        // Desktop-only quick access to monthly payment exports folders.
         Padding(
           padding: const EdgeInsets.only(left: 12, right: 12, bottom: 8),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: Wrap(
-                  alignment: WrapAlignment.start,
-                  spacing: 12,
-                  runSpacing: 8,
-                  children: [
-                    OutlinedButton.icon(
-                        onPressed: () => _openPaymentDir('payment_details'),
-                        icon: const Icon(Icons.folder_open),
-                        label: const Text('Open Payment Details Folder')),
-                    OutlinedButton.icon(
-                        onPressed: () => _openPaymentDir('payment_summary'),
-                        icon: const Icon(Icons.folder_open),
-                        label: const Text('Open Payment Summary Folder')),
-                    OutlinedButton.icon(
-                        onPressed: _rebuildAllReports,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Rebuild All Reports')),
-                    OutlinedButton.icon(
-                        onPressed: _copyAllDuesToClipboard,
-                        icon: const Icon(Icons.copy),
-                        label: const Text('Copy All Dues')),
-                  ],
+              if (!widget.readOnly && isDesktop)
+                Expanded(
+                  child: Wrap(
+                    alignment: WrapAlignment.start,
+                    spacing: 12,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                          style: appGreenOutlineButtonStyle(context),
+                          onPressed: () => _openPaymentDir('payment_details'),
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('Open Payment Details Folder')),
+                      OutlinedButton.icon(
+                          style: appGreenOutlineButtonStyle(context),
+                          onPressed: () => _openPaymentDir('payment_summary'),
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('Open Payment Summary Folder')),
+                      OutlinedButton.icon(
+                          style: appGreenOutlineButtonStyle(context),
+                          onPressed: _rebuildAllReports,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Rebuild All Reports')),
+                      OutlinedButton.icon(
+                          style: appGreenOutlineButtonStyle(context),
+                          onPressed: _copyAllDuesToClipboard,
+                          icon: const Icon(Icons.copy),
+                          label: const Text('Copy All Dues')),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(width: 12),
+              if (!widget.readOnly && isDesktop) const SizedBox(width: 12),
               DropdownButton<SortMode>(
                 focusNode: _sortFocusPayments,
                 value: _sortPayments,
                 onChanged: (v) {
                   if (v == null) return;
-                  setState(() => _sortPayments = v);
+                  setState(() {
+                    _sortPayments = v;
+                    _filteredRows = _filterAndSortRows(_rows);
+                  });
                   _sortFocusPayments.unfocus();
                 },
                 items: const [
-                  DropdownMenuItem(value: SortMode.mostUnpaid, child: Text('Most Unpaid')),
-                  DropdownMenuItem(value: SortMode.mostPaid, child: Text('Most Paid/Credit')),
-                  DropdownMenuItem(value: SortMode.newestFirst, child: Text('Latest Activity')),
-                  DropdownMenuItem(value: SortMode.oldestFirst, child: Text('Oldest Activity')),
+                  DropdownMenuItem(
+                      value: SortMode.mostUnpaid, child: Text('Most Unpaid')),
+                  DropdownMenuItem(
+                      value: SortMode.mostPaid,
+                      child: Text('Most Paid/Credit')),
+                  DropdownMenuItem(
+                      value: SortMode.newestFirst,
+                      child: Text('Latest Activity')),
+                  DropdownMenuItem(
+                      value: SortMode.oldestFirst,
+                      child: Text('Oldest Activity')),
                 ],
               ),
             ],
@@ -327,10 +435,14 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
           padding: const EdgeInsets.only(left: 12, right: 12, bottom: 8),
           child: TextField(
               controller: _q,
-              decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Search by name or customer ID'),
-              onChanged: (_) => setState(() {})),
+              decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search),
+                  hintText: 'Search by name or customer ID')),
         ),
-        Expanded(child: isDesktop ? listView : RefreshIndicator(onRefresh: _load, child: listView)),
+        Expanded(
+            child: isDesktop
+                ? listView
+                : RefreshIndicator(onRefresh: _refresh, child: listView)),
       ],
     );
   }
@@ -363,7 +475,8 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     }
     final lines = <String>[];
     for (final row in dueRows) {
-      final title = row.id.trim().isEmpty ? row.name : '${row.name} (${row.id})';
+      final title =
+          row.id.trim().isEmpty ? row.name : '${row.name} (${row.id})';
       lines.add('$title: ${fmt0(row.net)}');
     }
     await Clipboard.setData(ClipboardData(text: lines.join('\n')));
@@ -372,14 +485,17 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
   }
 
   Future<void> _openCustomerDetail(_KhataRow row) async {
-    final form = _forms.putIfAbsent(row.key, () => _AddPaymentFormState());
+    _forms.putIfAbsent(row.key, () => _AddPaymentFormState());
     var ledger = await _loadLedgerFor(row.key);
+    if (!mounted) return;
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) {
       return StatefulBuilder(builder: (ctx, setPageState) {
         return Scaffold(
           appBar: AppBar(
             title: Text(row.displayTitle),
-            leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(ctx)),
+            leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.pop(ctx)),
           ),
           body: SafeArea(
             child: SingleChildScrollView(
@@ -387,17 +503,42 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Wrap(
-                    spacing: 16,
-                    runSpacing: 8,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      _kv('Sales', row.sales),
-                      _kv('Payments', row.payments),
-                      _kv('Net (Plus)', row.net),
-                      _netBadge(row.net),
-                      if (row.contact.isNotEmpty) Text('Contact: ${row.contact}'),
-                    ],
+                  AppSoftCard(
+                    backgroundColor: _customerCardTint(row.net),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AppSectionTitle(
+                          title: row.displayTitle,
+                          subtitle: _activityLabel(row),
+                          trailing: _netBadge(row.net),
+                        ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            AppMetaChip(
+                              icon: Icons.trending_up_outlined,
+                              text: 'Sales ${fmt0(row.sales)}',
+                            ),
+                            AppMetaChip(
+                              icon: Icons.payments_outlined,
+                              text: 'Payments ${fmt0(row.payments)}',
+                            ),
+                            AppMetaChip(
+                              icon: Icons.account_balance_wallet_outlined,
+                              text: 'Net ${fmt0(row.net)}',
+                            ),
+                            if (row.contact.isNotEmpty)
+                              AppMetaChip(
+                                icon: Icons.phone_outlined,
+                                text: row.contact,
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                   const SizedBox(height: 12),
                   _ledgerList(ledger, onChanged: () async {
@@ -407,21 +548,23 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                     });
                   }),
                   const SizedBox(height: 12),
-                  TextButton.icon(
-                    onPressed: () => setPageState(() {}),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add Payment'),
-                  ),
-                  _addPaymentForm(
-                    row,
-                    setStateFn: setPageState,
-                    onChanged: () {
-                      _loadLedgerFor(row.key).then((v) {
-                        ledger = v;
-                        setPageState(() {});
-                      });
-                    },
-                  ),
+                  if (!widget.readOnly) ...[
+                    TextButton.icon(
+                      onPressed: () => setPageState(() {}),
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add Payment'),
+                    ),
+                    _addPaymentForm(
+                      row,
+                      setStateFn: setPageState,
+                      onChanged: () {
+                        _loadLedgerFor(row.key).then((v) {
+                          ledger = v;
+                          setPageState(() {});
+                        });
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -434,37 +577,57 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
   }
 
   Future<List<PaymentEntry>> _loadLedgerFor(String customerKey) async {
+    final cached = _ledgerByCustomer[customerKey];
+    if (cached != null) {
+      return List<PaymentEntry>.from(cached)..sort(_comparePaymentEntryByDate);
+    }
     final all = await PaymentStore.loadAll();
-    return all.where((e) => _customerKey(e.customerId, e.customer) == customerKey).toList()
-      ..sort((a, b) => a.date.compareTo(b.date));
+    return all
+        .where((e) => _customerKey(e.customerId, e.customer) == customerKey)
+        .toList()
+      ..sort(_comparePaymentEntryByDate);
   }
 
-  Widget _kv(String label, double value) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text('$label: '),
-        Text(fmt0(value), style: numStyle(weight: FontWeight.w600)),
-      ],
-    );
+  int _comparePaymentEntryByDate(PaymentEntry a, PaymentEntry b) {
+    DateTime? da;
+    DateTime? db;
+    try {
+      da = parseInvoiceDate(a.date);
+    } catch (_) {}
+    try {
+      db = parseInvoiceDate(b.date);
+    } catch (_) {}
+    if (da != null && db != null) {
+      final cmp = da.compareTo(db);
+      if (cmp != 0) return cmp;
+    } else if (da != null) {
+      return -1;
+    } else if (db != null) {
+      return 1;
+    }
+    return a.date.compareTo(b.date);
   }
 
   Widget _netBadge(double net) {
     if (net > 1e-6) {
-      return _statusChip(label: 'Customer owes', fg: const Color(0xFFB71C1C), bg: const Color(0xFFFFCDD2));
+      return const AppStatusPill(
+        text: 'Customer owes',
+        color: Color(0xFFB71C1C),
+      );
     } else if (net < -1e-6) {
-      return _statusChip(label: 'In credit', fg: const Color(0xFF1B5E20), bg: const Color(0xFFC8E6C9));
+      return const AppStatusPill(
+        text: 'In credit',
+        color: Color(0xFF1B5E20),
+      );
     }
-    return _statusChip(label: 'Settled', fg: const Color(0xFF1B5E20), bg: const Color(0xFFC8E6C9));
-  }
-
-  Widget _statusChip({required String label, required Color fg, required Color bg}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
-      child: Text(label, style: TextStyle(color: fg, fontWeight: FontWeight.w600)),
+    return const AppStatusPill(
+      text: 'Settled',
+      color: Color(0xFF1B5E20),
     );
   }
+
+  Color _customerCardTint(double net) =>
+      net > 1e-6 ? const Color(0xFFFFF5F5) : const Color(0xFFF3FBF6);
 
   Widget _ledgerList(List<PaymentEntry> entries, {VoidCallback? onChanged}) {
     if (entries.isEmpty) return const Text('No payments recorded');
@@ -472,34 +635,82 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
-          height: 32,
+          height: 36,
           padding: const EdgeInsets.symmetric(horizontal: 8),
           alignment: Alignment.centerLeft,
           child: const Row(children: [
-            SizedBox(width: 110, child: Text('Date', style: TextStyle(fontWeight: FontWeight.w600))),
-            Expanded(child: Text('Type / Note', style: TextStyle(fontWeight: FontWeight.w600))),
-            SizedBox(width: 120, child: Align(alignment: Alignment.centerRight, child: Text('Amount', style: TextStyle(fontWeight: FontWeight.w600)))),
+            SizedBox(
+                width: 110,
+                child: Text('Date',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      color: Color(0xFF22304A),
+                    ))),
+            Expanded(
+                child: Text('Type / Note',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      color: Color(0xFF22304A),
+                    ))),
+            SizedBox(
+                width: 120,
+                child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Text('Amount',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                          color: Color(0xFF22304A),
+                        )))),
             SizedBox(width: 48, child: Text('')),
           ]),
         ),
         ...entries.map((e) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+              padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
               child: Row(children: [
-                SizedBox(width: 110, child: Text(e.date)),
+                SizedBox(
+                  width: 110,
+                  child: Text(
+                    e.date,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Color(0xFF384357),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
                 Expanded(
                     child: Text(
                   _entryDetails(e),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.black87),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xFF384357),
+                  ),
                 )),
-                SizedBox(width: 120, child: Text(fmt0(e.effectiveAmount), textAlign: TextAlign.right, style: numStyle(weight: FontWeight.w600))),
+                SizedBox(
+                    width: 120,
+                    child: Text(fmt0(e.effectiveAmount),
+                        textAlign: TextAlign.right,
+                        style: numStyle(
+                          weight: FontWeight.w700,
+                          color: const Color(0xFF22304A),
+                        ))),
                 SizedBox(
                     width: 48,
-                    child: IconButton(
-                        tooltip: 'Delete payment',
-                        icon: const Icon(Icons.remove_circle_outline, color: Color(0xFFB71C1C)),
-                        onPressed: () => _confirmDeletePayment(e, onChanged: onChanged))),
+                    child: widget.readOnly
+                        ? const SizedBox.shrink()
+                        : IconButton(
+                            tooltip: 'Delete payment',
+                            icon: const Icon(Icons.remove_circle_outline,
+                                color: Color(0xFFB71C1C)),
+                            onPressed: () => _confirmDeletePayment(
+                                  e,
+                                  onChanged: onChanged,
+                                ))),
               ]),
             )),
       ],
@@ -522,8 +733,31 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     return details.isEmpty ? '-' : details.join(' / ');
   }
 
-  Widget _addPaymentForm(_KhataRow row, {required StateSetter setStateFn, VoidCallback? onChanged}) {
+  Widget _addPaymentForm(_KhataRow row,
+      {required StateSetter setStateFn, VoidCallback? onChanged}) {
     final f = _forms.putIfAbsent(row.key, () => _AddPaymentFormState());
+    ChoiceChip paymentChip(String label, PaymentType type) {
+      final selected = f.type == type;
+      return ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => setStateFn(() => f.type = type),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        side: BorderSide(
+          color: selected ? const Color(0xFF00838F) : const Color(0xFFB9DBD7),
+        ),
+        backgroundColor: Colors.white,
+        selectedColor: const Color(0xFFE3F2F0),
+        labelStyle: TextStyle(
+          color: selected ? const Color(0xFF00838F) : const Color(0xFF273247),
+          fontWeight: FontWeight.w700,
+        ),
+        labelPadding: const EdgeInsets.symmetric(horizontal: 12),
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
+      );
+    }
+
     return Card(
       elevation: 0,
       color: const Color(0xFFFAFAFA),
@@ -535,33 +769,9 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
             Wrap(
               spacing: 8,
               children: [
-                ChoiceChip(
-                    label: const Text('Cash'),
-                    selected: f.type == PaymentType.cash,
-                    onSelected: (_) => setStateFn(() => f.type = PaymentType.cash),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    side: BorderSide(color: f.type == PaymentType.cash ? Colors.transparent : const Color(0x33000000)),
-                    labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact),
-                ChoiceChip(
-                    label: const Text('Cheque'),
-                    selected: f.type == PaymentType.cheque,
-                    onSelected: (_) => setStateFn(() => f.type = PaymentType.cheque),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    side: BorderSide(color: f.type == PaymentType.cheque ? Colors.transparent : const Color(0x33000000)),
-                    labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact),
-                ChoiceChip(
-                    label: const Text('Bank'),
-                    selected: f.type == PaymentType.bank,
-                    onSelected: (_) => setStateFn(() => f.type = PaymentType.bank),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    side: BorderSide(color: f.type == PaymentType.bank ? Colors.transparent : const Color(0x33000000)),
-                    labelPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    visualDensity: VisualDensity.compact),
+                paymentChip('Cash', PaymentType.cash),
+                paymentChip('Cheque', PaymentType.cheque),
+                paymentChip('Bank', PaymentType.bank),
               ],
             ),
             const SizedBox(height: 8),
@@ -580,7 +790,8 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                     }
                   },
                   child: InputDecorator(
-                    decoration: const InputDecoration(labelText: 'Payment date'),
+                    decoration:
+                        const InputDecoration(labelText: 'Payment date'),
                     child: Row(
                       children: [
                         const Icon(Icons.calendar_today, size: 18),
@@ -598,15 +809,20 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                   child: TextField(
                       controller: f.amount,
                       keyboardType: TextInputType.number,
-                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))],
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))
+                      ],
                       decoration: const InputDecoration(labelText: 'Amount'))),
               const SizedBox(width: 12),
               Expanded(
                   child: TextField(
                 controller: f.discount,
                 keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))],
-                decoration: const InputDecoration(labelText: 'Discount (optional)'),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9]'))
+                ],
+                decoration:
+                    const InputDecoration(labelText: 'Discount (optional)'),
               )),
               const SizedBox(width: 12),
               Expanded(
@@ -614,13 +830,17 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                 textEditingController: f.note,
                 focusNode: f.noteFocus,
                 optionsBuilder: (textEditingValue) {
-                  if (_noteSuggestions.isEmpty) return const Iterable<String>.empty();
+                  if (_noteSuggestions.isEmpty) {
+                    return const Iterable<String>.empty();
+                  }
                   final q = textEditingValue.text.trim().toLowerCase();
                   if (q.isEmpty) return _noteSuggestions;
-                  return _noteSuggestions.where((n) => n.toLowerCase().contains(q));
+                  return _noteSuggestions
+                      .where((n) => n.toLowerCase().contains(q));
                 },
                 onSelected: (v) => f.note.text = v,
-                fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
+                fieldViewBuilder:
+                    (context, controller, focusNode, onFieldSubmitted) {
                   return TextField(
                     controller: controller,
                     focusNode: focusNode,
@@ -640,7 +860,8 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
                       elevation: 4,
                       borderRadius: BorderRadius.circular(8),
                       child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxHeight: 200, minWidth: 200),
+                        constraints:
+                            const BoxConstraints(maxHeight: 200, minWidth: 200),
                         child: ListView.builder(
                           padding: EdgeInsets.zero,
                           itemCount: options.length,
@@ -662,27 +883,44 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
             if (f.type == PaymentType.cheque) ...[
               const SizedBox(height: 8),
               Row(children: [
-                Expanded(child: TextField(controller: f.bank, decoration: const InputDecoration(labelText: 'Bank'))),
+                Expanded(
+                    child: TextField(
+                        controller: f.bank,
+                        decoration: const InputDecoration(labelText: 'Bank'))),
                 const SizedBox(width: 12),
-                Expanded(child: TextField(controller: f.chequeNo, decoration: const InputDecoration(labelText: 'Cheque No'))),
+                Expanded(
+                    child: TextField(
+                        controller: f.chequeNo,
+                        decoration:
+                            const InputDecoration(labelText: 'Cheque No'))),
               ]),
             ] else if (f.type == PaymentType.bank) ...[
               const SizedBox(height: 8),
               Row(children: [
-                Expanded(child: TextField(controller: f.bank, decoration: const InputDecoration(labelText: 'Bank'))),
+                Expanded(
+                    child: TextField(
+                        controller: f.bank,
+                        decoration: const InputDecoration(labelText: 'Bank'))),
                 const SizedBox(width: 12),
-                Expanded(child: TextField(controller: f.txnId, decoration: const InputDecoration(labelText: 'Txn ID'))),
+                Expanded(
+                    child: TextField(
+                        controller: f.txnId,
+                        decoration:
+                            const InputDecoration(labelText: 'Txn ID'))),
                 const SizedBox(width: 12),
                 SizedBox(
                   width: 180,
                   child: DropdownButtonFormField<String>(
                     key: ValueKey('mode-${f.bankMode}-${row.key}'),
-                    value: f.bankMode,
+                    initialValue: f.bankMode,
                     items: const [
-                      DropdownMenuItem(value: 'Deposit', child: Text('Deposit')),
-                      DropdownMenuItem(value: 'Transfer', child: Text('Transfer')),
+                      DropdownMenuItem(
+                          value: 'Deposit', child: Text('Deposit')),
+                      DropdownMenuItem(
+                          value: 'Transfer', child: Text('Transfer')),
                     ],
-                    onChanged: (v) => setStateFn(() => f.bankMode = v ?? 'Deposit'),
+                    onChanged: (v) =>
+                        setStateFn(() => f.bankMode = v ?? 'Transfer'),
                     decoration: const InputDecoration(labelText: 'Mode'),
                   ),
                 ),
@@ -692,11 +930,36 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
             Wrap(
               spacing: 8,
               children: [
+                OutlinedButton.icon(
+                    style: appGreenOutlineButtonStyle(context),
+                    onPressed: f.ocrBusy
+                        ? null
+                        : () => _pasteSlipAndExtract(
+                              row,
+                              setStateFn: setStateFn,
+                            ),
+                    icon: f.ocrBusy
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.image_search_outlined),
+                    label:
+                        Text(f.ocrBusy ? 'Reading Slip...' : 'Paste Slip OCR')),
                 FilledButton.icon(
-                    onPressed: () => _savePayment(row, onChanged: () { setStateFn(() {}); onChanged?.call(); }),
+                    style: appGreenButtonStyle(context),
+                    onPressed: () => _savePayment(row, onChanged: () {
+                          setStateFn(() {});
+                          onChanged?.call();
+                        }),
                     icon: const Icon(Icons.save),
                     label: const Text('Save Payment')),
                 TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF00838F),
+                      textStyle: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
                     onPressed: () {
                       setStateFn(() {
                         f.clear();
@@ -720,21 +983,29 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       return;
     }
     try {
-        await addPaymentForCustomer(
-          customerId: row.id,
-          customerName: row.name,
-          type: f.type,
-          date: f.date,
-          amount: amt,
-          discount: disc,
-          chequeNo: f.chequeNo.text.trim().isEmpty ? null : f.chequeNo.text.trim(),
-          bank: f.bank.text.trim().isEmpty ? null : f.bank.text.trim(),
-          txnId: f.txnId.text.trim().isEmpty ? null : f.txnId.text.trim(),
+      final payment = await addPaymentForCustomer(
+        customerId: row.id,
+        customerName: row.name,
+        type: f.type,
+        date: f.date,
+        amount: amt,
+        discount: disc,
+        paymentId: _mobilePaymentId(),
+        chequeNo:
+            f.chequeNo.text.trim().isEmpty ? null : f.chequeNo.text.trim(),
+        bank: f.bank.text.trim().isEmpty ? null : f.bank.text.trim(),
+        txnId: f.txnId.text.trim().isEmpty ? null : f.txnId.text.trim(),
         bankMode: f.type == PaymentType.bank ? (f.bankMode) : null,
         note: f.note.text.trim().isEmpty ? null : f.note.text.trim(),
       );
+      final queuedForLaptop = await _deliverMobilePayment(payment);
       if (!mounted) return;
-      showOk(context, 'Payment saved');
+      showOk(
+        context,
+        queuedForLaptop
+            ? 'Payment saved on mobile and queued for laptop.'
+            : 'Payment saved',
+      );
       setState(() {
         f.clear();
       });
@@ -746,15 +1017,121 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
     }
   }
 
-  Future<void> _confirmDeletePayment(PaymentEntry e, {VoidCallback? onChanged}) async {
+  Future<bool> _deliverMobilePayment(PaymentEntry payment) async {
+    final user = widget.mobileUser;
+    if (user == null || user.role != UserRole.admin) return false;
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      await ServerSyncClient.submitPayment(
+        baseUrl: config.baseUrl,
+        username: user.username,
+        passcode: user.passcode,
+        payment: payment,
+      );
+      await MobileAccessStore.removeOutgoingPayment(payment.id);
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: DateTime.now().toIso8601String(),
+          direction: SyncLogDirection.outgoing,
+          status: SyncLogStatus.success,
+          entityType: 'payment',
+          entityId: payment.id,
+          summary: 'Payment sent to laptop',
+          details: payment.customer,
+        ),
+      );
+      return false;
+    } on ServerSyncException catch (e) {
+      await MobileAccessStore.queueOutgoingPayment(payment);
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: DateTime.now().toIso8601String(),
+          direction: SyncLogDirection.outgoing,
+          status: SyncLogStatus.warning,
+          entityType: 'payment',
+          entityId: payment.id,
+          summary: 'Payment queued for laptop',
+          details: e.message,
+        ),
+      );
+      return true;
+    }
+  }
+
+  String? _mobilePaymentId() {
+    final user = widget.mobileUser;
+    if (user == null || user.role != UserRole.admin) return null;
+    return 'MPAY-${DateTime.now().microsecondsSinceEpoch}';
+  }
+
+  Future<void> _pasteSlipAndExtract(
+    _KhataRow row, {
+    required StateSetter setStateFn,
+  }) async {
+    final f = _forms.putIfAbsent(row.key, () => _AddPaymentFormState());
+    if (f.ocrBusy) return;
+
+    setStateFn(() => f.ocrBusy = true);
+    try {
+      final result = await SlipOcrService.readFromClipboardImage();
+      if (!mounted) return;
+
+      setStateFn(() {
+        if (result.date != null) {
+          f.date = result.date!;
+        }
+        if (result.amount != null) {
+          final amt = result.amount!;
+          f.amount.text =
+              (amt % 1 == 0) ? amt.toStringAsFixed(0) : amt.toStringAsFixed(2);
+        }
+        if ((result.receiver ?? '').trim().isNotEmpty) {
+          final extracted = result.receiver!.trim();
+          if (f.note.text.trim().isEmpty) {
+            f.note.text = 'Received by: $extracted';
+          } else if (!f.note.text.toLowerCase().contains('received by')) {
+            f.note.text = '${f.note.text.trim()} | Received by: $extracted';
+          }
+        }
+      });
+
+      final missing = <String>[];
+      if (result.date == null) missing.add('date');
+      if (result.amount == null) missing.add('amount');
+      if ((result.receiver ?? '').trim().isEmpty) missing.add('receiver');
+      if (missing.isEmpty) {
+        showOk(context, 'Slip parsed: date, amount, and receiver filled');
+      } else {
+        showErr(
+            context, 'Slip parsed partially. Missing: ${missing.join(', ')}');
+      }
+    } catch (err) {
+      if (!mounted) return;
+      showErr(context, err.toString());
+    } finally {
+      if (mounted) {
+        setStateFn(() => f.ocrBusy = false);
+      }
+    }
+  }
+
+  Future<void> _confirmDeletePayment(PaymentEntry e,
+      {VoidCallback? onChanged}) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Delete Payment'),
-        content: Text('Delete ${paymentTypeLabel(e.type)} of ${fmt0(e.effectiveAmount)}?'),
+        content: Text(
+            'Delete ${paymentTypeLabel(e.type)} of ${fmt0(e.effectiveAmount)}?'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete')),
         ],
       ),
     );
@@ -775,13 +1152,62 @@ class _PaymentsScreenState extends State<PaymentsScreen> with AutomaticKeepAlive
       try {
         await refreshReportsForInvoices(<int>{});
       } catch (_) {}
+      final queuedForLaptop = await _deliverMobilePaymentDelete(e.id);
       if (!mounted) return;
-      showOk(context, 'Payment deleted');
+      showOk(
+        context,
+        queuedForLaptop
+            ? 'Payment deleted on mobile and queued for laptop.'
+            : 'Payment deleted',
+      );
       await _load();
       onChanged?.call();
     } catch (err) {
       if (!mounted) return;
       showErr(context, 'Failed to delete: $err');
+    }
+  }
+
+  Future<bool> _deliverMobilePaymentDelete(String paymentId) async {
+    final user = widget.mobileUser;
+    if (user == null || user.role != UserRole.admin) return false;
+    await MobileAccessStore.removeOutgoingPayment(paymentId);
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      await ServerSyncClient.deletePayment(
+        baseUrl: config.baseUrl,
+        username: user.username,
+        passcode: user.passcode,
+        paymentId: paymentId,
+      );
+      await MobileAccessStore.removeOutgoingPaymentDelete(paymentId);
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: DateTime.now().toIso8601String(),
+          direction: SyncLogDirection.outgoing,
+          status: SyncLogStatus.success,
+          entityType: 'payment',
+          entityId: paymentId,
+          summary: 'Payment delete sent to laptop',
+        ),
+      );
+      return false;
+    } on ServerSyncException catch (e) {
+      await MobileAccessStore.queueOutgoingPaymentDelete(paymentId);
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: DateTime.now().toIso8601String(),
+          direction: SyncLogDirection.outgoing,
+          status: SyncLogStatus.warning,
+          entityType: 'payment',
+          entityId: paymentId,
+          summary: 'Payment delete queued for laptop',
+          details: e.message,
+        ),
+      );
+      return true;
     }
   }
 }
@@ -827,7 +1253,8 @@ class _AddPaymentFormState {
   final TextEditingController bank = TextEditingController();
   final TextEditingController txnId = TextEditingController();
   final TextEditingController discount = TextEditingController();
-  String bankMode = 'Deposit';
+  String bankMode = 'Transfer';
+  bool ocrBusy = false;
   void clear() {
     date = DateTime.now();
     amount.clear();
@@ -836,8 +1263,9 @@ class _AddPaymentFormState {
     bank.clear();
     txnId.clear();
     discount.clear();
-    bankMode = 'Deposit';
+    bankMode = 'Transfer';
     type = PaymentType.cash;
+    ocrBusy = false;
   }
 
   void dispose() {

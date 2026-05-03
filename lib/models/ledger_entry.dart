@@ -1,5 +1,5 @@
-class SurjaniLedgerEntry {
-  final String id; // SL-YYYYMMDD-###
+class LedgerEntry {
+  final String id;
   final String date; // yyyy-MM-dd
   final String particulars;
   final double qty;
@@ -8,7 +8,7 @@ class SurjaniLedgerEntry {
   final double credit;
   final String? note;
 
-  const SurjaniLedgerEntry({
+  const LedgerEntry({
     required this.id,
     required this.date,
     required this.particulars,
@@ -21,7 +21,7 @@ class SurjaniLedgerEntry {
 
   double get net => debit - credit;
 
-  SurjaniLedgerEntry copyWith({
+  LedgerEntry copyWith({
     String? id,
     String? date,
     String? particulars,
@@ -31,7 +31,7 @@ class SurjaniLedgerEntry {
     double? credit,
     String? note,
   }) {
-    return SurjaniLedgerEntry(
+    return LedgerEntry(
       id: id ?? this.id,
       date: date ?? this.date,
       particulars: particulars ?? this.particulars,
@@ -54,9 +54,9 @@ class SurjaniLedgerEntry {
         'note': note,
       };
 
-  static SurjaniLedgerEntry fromJson(Map<String, dynamic> j) {
+  static LedgerEntry fromJson(Map<String, dynamic> j) {
     double asDouble(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
-    return SurjaniLedgerEntry(
+    return LedgerEntry(
       id: (j['id'] ?? '').toString(),
       date: (j['date'] ?? '').toString(),
       particulars: (j['particulars'] ?? '').toString(),

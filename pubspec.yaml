@@ -2,7 +2,7 @@ name: quickbill_by_abdullah
 description: QuickBill By Abdullah - Personal Invoicing App
 publish_to: "none"
 
-version: 1.0.1+2
+version: 1.0.2+3
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -15,9 +15,17 @@ dependencies:
   pdf: ^3.11.0
   intl: ^0.19.0
   open_filex: ^4.4.0
+  share_plus: ^10.1.2
   excel: ^4.0.3
   window_manager: ^0.3.8
   font_awesome_flutter: ^10.7.0
+  file_picker: ^11.0.2
+  fl_chart: ^1.1.1
+  flutter_animate: ^4.5.2
+  local_auth: ^2.3.0
+  flutter_local_notifications: ^20.1.0
+  tray_manager: ^0.5.2
+  package_info_plus: ^8.0.2
   
 
 
@@ -33,6 +41,7 @@ flutter:
   assets:
     - assets/template.jpg
     - assets/icon.png
+    - windows/runner/resources/app_icon.ico
 
   fonts:
     - family: Poppins

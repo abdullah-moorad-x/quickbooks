@@ -8,11 +8,14 @@ class ItemLine {
   int qty;
   double rate;
 
+  final TextEditingController brandCtrl = TextEditingController();
+  final FocusNode brandFocus = FocusNode();
   final TextEditingController qtyCtrl = TextEditingController();
   final TextEditingController rateCtrl = TextEditingController();
   final FocusNode rateFocus = FocusNode();
 
   ItemLine(this.typeLabel, {this.brand = '', this.qty = 0, this.rate = 0}) {
+    brandCtrl.text = brand;
     qtyCtrl.text = qty == 0 ? '' : '$qty';
     rateCtrl.text = rate == 0 ? '' : rate.toStringAsFixed(0);
   }
@@ -21,7 +24,13 @@ class ItemLine {
   Map<String, dynamic> toJson() => {
     'type': typeLabel, 'brand': brand, 'qty': qty, 'rate': rate, 'amount': amount,
   };
-  void dispose() { qtyCtrl.dispose(); rateCtrl.dispose(); rateFocus.dispose(); }
+  void dispose() {
+    brandCtrl.dispose();
+    brandFocus.dispose();
+    qtyCtrl.dispose();
+    rateCtrl.dispose();
+    rateFocus.dispose();
+  }
 }
 
 class Invoice {

@@ -8,7 +8,7 @@
 ; (build metadata "+1" is not used here)
 ; --------------------------------------------------
 #define MyAppName "QuickBill By Abdullah"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Abdullah"
 #define MyAppExeName "QuickBill_By_Abdullah.exe"
 ; AppId GUID (keep stable across versions). Use doubled braces per Inno docs.
