@@ -8,7 +8,7 @@
 ; (build metadata "+1" is not used here)
 ; --------------------------------------------------
 #define MyAppName "QuickBill By Abdullah"
-#define MyAppVersion "1.0.2"
+#define MyAppVersion "1.0.3"
 #define MyAppPublisher "Abdullah"
 #define MyAppExeName "QuickBill_By_Abdullah.exe"
 ; AppId GUID (keep stable across versions). Use doubled braces per Inno docs.
@@ -52,3 +52,4 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+

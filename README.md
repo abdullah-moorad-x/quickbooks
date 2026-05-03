@@ -25,6 +25,21 @@ flutter pub get
 flutter run -d windows # or macos/linux
 ## Build (desktop)
 flutter build windows # adjust for macos/linux
+
+## Release (desktop installer + git push + tag push)
+Use the helper script to bump version, build the installer, commit, push, and push the release tag:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\prepare_release.ps1 -Version 1.0.3
+```
+
+Optional:
+- `-BuildNumber 4`
+- `-CommitMessage "Release v1.0.3"`
+
+After the script finishes, create a GitHub Release for the new tag and upload:
+- `dist\QuickBill_By_Abdullah_Installer.exe`
+
 ## Adapting for another shop
 - Update branding/title/icons/templates (`lib/app.dart`, assets).
 - Adjust item types/sites (`lib/core/constants.dart`).
