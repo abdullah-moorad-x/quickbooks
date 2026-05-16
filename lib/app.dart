@@ -283,9 +283,15 @@ class _HomeState extends State<Home> {
       if (shouldInstall == true) {
         await AppUpdateService.launchInstallerAndExit(installerFile);
       }
-    } catch (e) {
+    } on AppUpdateCheckException catch (e) {
       if (!mounted) return;
-      showErr(context, 'Update check failed: $e');
+      showErr(context, e.message);
+    } on SocketException {
+      if (!mounted) return;
+      showErr(context, 'Could not check for updates. Please check internet.');
+    } catch (_) {
+      if (!mounted) return;
+      showErr(context, 'Could not check for updates right now.');
     } finally {
       if (mounted) setState(() => _checkingForUpdates = false);
     }

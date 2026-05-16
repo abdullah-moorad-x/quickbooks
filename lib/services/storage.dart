@@ -166,6 +166,49 @@ class Store {
     AppBus.bump();
   }
 
+  static Future<void> upsertInvoice(Invoice inv) async {
+    final f = await _file();
+    final current = _cache == null ? await _readInvoicesFromDisk(f) : _cache!;
+    final next = _cloneInvoices(current);
+    final idx = next.indexWhere((x) => x.sNo == inv.sNo);
+    final previousJson = idx >= 0 ? _stableJson(next[idx].toJson()) : null;
+    final nextJson = _stableJson(inv.toJson());
+    if (previousJson == nextJson) return;
+    final saved = Invoice(
+      sNo: inv.sNo,
+      date: inv.date,
+      customer: inv.customer,
+      customerDisplay: inv.customerDisplay,
+      customerId: inv.customerId,
+      contact: inv.contact,
+      address: inv.address,
+      site: inv.site,
+      lines: _cloneLines(inv.lines),
+      cartage: inv.cartage,
+      paid: inv.paid,
+      walkIn: inv.walkIn,
+      walkInPaymentType: inv.walkInPaymentType,
+      walkInPaymentNote: inv.walkInPaymentNote,
+      walkInBank: inv.walkInBank,
+      walkInChequeNo: inv.walkInChequeNo,
+      walkInTxnId: inv.walkInTxnId,
+      walkInBankMode: inv.walkInBankMode,
+    );
+    if (idx >= 0) {
+      next[idx] = saved;
+    } else {
+      next.add(saved);
+    }
+    _cache = next;
+    await f.writeAsString(jsonEncode(_cache!.map((e) => e.toJson()).toList()));
+    await SyncChangeLogStore.recordChange(
+      entityType: 'invoice',
+      entityId: inv.sNo.toString(),
+      action: 'upsert',
+    );
+    AppBus.bump();
+  }
+
   static Future<int> nextSerial() async {
     final all = await loadAll();
     if (all.isEmpty) return 1;

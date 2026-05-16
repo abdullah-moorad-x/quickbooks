@@ -114,6 +114,29 @@ class SyncChangeLogStore {
     await saveAll(all);
   }
 
+  static Future<void> recordChange({
+    required String entityType,
+    required String entityId,
+    required String action,
+  }) async {
+    final cleanEntityType = entityType.trim();
+    final cleanEntityId = entityId.trim();
+    final cleanAction = action.trim();
+    if (cleanEntityType.isEmpty ||
+        cleanEntityId.isEmpty ||
+        cleanAction.isEmpty) {
+      return;
+    }
+    final all = await loadAll();
+    all.add(_entry(
+      cleanEntityType,
+      cleanEntityId,
+      cleanAction,
+      DateTime.now().toIso8601String(),
+    ));
+    await saveAll(all);
+  }
+
   static SyncChangeEntry _entry(
     String entityType,
     String entityId,

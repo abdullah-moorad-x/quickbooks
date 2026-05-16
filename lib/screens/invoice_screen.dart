@@ -590,14 +590,7 @@ class _InvoiceScreenState extends State<InvoiceScreen>
 
   Future<void> _persistInvoice(Invoice inv) async {
     final previous = _originalInvoice;
-    final all = await Store.loadAll();
-    final idx = all.indexWhere((x) => x.sNo == inv.sNo);
-    if (idx >= 0) {
-      all[idx] = inv;
-    } else {
-      all.add(inv);
-    }
-    await Store.saveAll(all);
+    await Store.upsertInvoice(inv);
     if (!inv.walkIn) {
       await CustomerStore.upsertFixed(Customer(
         id: inv.customerId,
@@ -758,12 +751,6 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     );
     await _persistInvoice(inv);
     await _savePaymentFromInvoiceIfNeeded(inv);
-    final pdfBytes = await PdfBuilder.build(inv);
-    final invDir = await subdir('invoices');
-    final pdfFile =
-        File('${invDir.path}${Platform.pathSeparator}invoice_${inv.sNo}.pdf');
-    final written = await safeWriteBytes(pdfFile, pdfBytes);
-    await OpenFilex.open(written.path);
     if (!mounted) return;
     if (_isEditing) {
       showOk(context, 'Updated invoice #${inv.sNo}');
@@ -783,7 +770,7 @@ class _InvoiceScreenState extends State<InvoiceScreen>
       if (!_validateInvoiceInputs()) return;
       if (_contact.text.trim().isEmpty) {
         showErr(context,
-            'Add a phone number to send via WhatsApp. You can still use "Save PDF" without a number.');
+            'Add a phone number to send via WhatsApp. You can still save the invoice without a number.');
         return;
       }
       final snapshotLines = await _snapshotLinesForSave();
@@ -1440,7 +1427,7 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                               ? 'Save changes back to the pending draft'
                               : _isMobileDraftMode
                                   ? 'Submit this invoice as a pending draft'
-                                  : 'Save invoice, export PDF and open it',
+                                  : 'Save invoice without generating a PDF',
                           child: FilledButton.icon(
                             onPressed: _isPendingDraftEdit
                                 ? _savePendingDraftEdit
@@ -1452,13 +1439,13 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                                 ? Icons.save_outlined
                                 : _isMobileDraftMode
                                     ? Icons.send_outlined
-                                    : Icons.picture_as_pdf_rounded),
+                                    : Icons.save_outlined),
                             label: Text(
                                 _isPendingDraftEdit
                                     ? 'Save Draft'
                                     : _isMobileDraftMode
                                         ? 'Submit Draft'
-                                        : 'Save PDF',
+                                        : 'Save Invoice',
                                 overflow: TextOverflow.ellipsis),
                           ),
                         ),

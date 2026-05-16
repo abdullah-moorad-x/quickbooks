@@ -1049,9 +1049,7 @@ class LocalApiServer {
       paid: 0,
       walkIn: false,
     );
-    final invoices = await Store.loadAll();
-    invoices.add(actual);
-    await Store.saveAll(invoices);
+    await Store.upsertInvoice(actual);
     if (resolvedCustomerId.isNotEmpty || invoice.customer.trim().isNotEmpty) {
       final customerId = resolvedCustomerId.isEmpty
           ? await CustomerStore.nextCustomerId()

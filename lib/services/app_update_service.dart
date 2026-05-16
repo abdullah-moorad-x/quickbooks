@@ -22,9 +22,24 @@ class AppUpdateInfo {
   });
 }
 
+class AppUpdateCheckException implements Exception {
+  final String message;
+
+  const AppUpdateCheckException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 class AppUpdateService {
-  static const String _repoOwner = 'abdullah-moorad-x';
-  static const String _repoName = 'quickbooks';
+  static const String _repoOwner = String.fromEnvironment(
+    'QUICKBILL_UPDATE_REPO_OWNER',
+    defaultValue: 'abdullah-moorad-x',
+  );
+  static const String _repoName = String.fromEnvironment(
+    'QUICKBILL_UPDATE_REPO_NAME',
+    defaultValue: 'quickbooks',
+  );
   static const String _latestReleaseUrl =
       'https://api.github.com/repos/$_repoOwner/$_repoName/releases/latest';
 
@@ -115,10 +130,14 @@ class AppUpdateService {
       request.headers.set(HttpHeaders.userAgentHeader, 'QuickBill-Updater');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       final response = await request.close();
+      if (response.statusCode == HttpStatus.notFound) {
+        throw const AppUpdateCheckException(
+          'Update feed not found. Publish a GitHub release or check the updater repository settings.',
+        );
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw HttpException(
-          'Request failed with status ${response.statusCode}.',
-          uri: Uri.parse(url),
+        throw AppUpdateCheckException(
+          'Update server returned status ${response.statusCode}.',
         );
       }
       final body = await utf8.decodeStream(response);

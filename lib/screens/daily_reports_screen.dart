@@ -45,6 +45,10 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
   Map<String, double> _sumPaid = {};
   Map<String, double> _sumRemaining = {};
   _HisaabImageData? _captureData;
+  bool _showHisaabImageView = false;
+  bool _hisaabViewLoading = false;
+  DateTime _hisaabViewDay = DateTime.now();
+  _HisaabImageData? _hisaabViewData;
 
   @override
   void initState() {
@@ -272,6 +276,57 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
         setState(() => _captureData = null);
       }
     }
+  }
+
+  Future<void> _loadHisaabImageView({bool force = false}) async {
+    if (_hisaabViewLoading) return;
+    final current = _hisaabViewData;
+    if (!force && current != null && _sameDay(current.day, _hisaabViewDay)) {
+      return;
+    }
+    final requestedDay = _hisaabViewDay;
+    setState(() => _hisaabViewLoading = true);
+    try {
+      final data = await _buildHisaabImageData(requestedDay);
+      if (!mounted) return;
+      if (!_sameDay(requestedDay, _hisaabViewDay)) {
+        setState(() => _hisaabViewLoading = false);
+        return;
+      }
+      setState(() {
+        _hisaabViewData = data;
+        _hisaabViewLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _hisaabViewLoading = false);
+      showErr(context, 'Could not load hisaab image view');
+    }
+  }
+
+  Future<void> _pickHisaabViewDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _hisaabViewDay,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null) return;
+    setState(() {
+      _hisaabViewDay = _dateOnly(picked);
+      _hisaabViewData = null;
+    });
+    await _loadHisaabImageView(force: true);
+  }
+
+  Future<void> _exportCurrentHisaabImage() async {
+    final file = await _exportHisaabImage(_hisaabViewDay);
+    if (!mounted) return;
+    if (file == null) {
+      showErr(context, 'Could not export hisaab image');
+      return;
+    }
+    showOk(context, 'Saved ${file.path.split(Platform.pathSeparator).last}');
   }
 
   Future<void> _exportRangeNow() async {
@@ -578,6 +633,112 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
     );
   }
 
+  Widget _viewModeToggle() {
+    return SegmentedButton<bool>(
+      segments: const [
+        ButtonSegment<bool>(
+          value: false,
+          icon: Icon(Icons.table_chart_outlined),
+          label: Text('Sheets'),
+        ),
+        ButtonSegment<bool>(
+          value: true,
+          icon: Icon(Icons.image_outlined),
+          label: Text('Hisaab Image'),
+        ),
+      ],
+      selected: {_showHisaabImageView},
+      onSelectionChanged: (values) {
+        final next = values.first;
+        setState(() => _showHisaabImageView = next);
+        if (next) {
+          _loadHisaabImageView();
+        }
+      },
+    );
+  }
+
+  Widget _hisaabImageViewCard() {
+    final data = _hisaabViewData;
+    return AppSoftCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          AppSectionTitle(
+            title: 'Daily Hisaab Image View',
+            subtitle: 'Preview the same layout used for exported PNG images.',
+            trailing: AppMetaChip(
+              icon: Icons.calendar_today_outlined,
+              text: formatInvoiceDate(_hisaabViewDay),
+              backgroundColor: const Color(0xFFF3F6FA),
+              borderColor: const Color(0xFFDCE5EE),
+              foregroundColor: const Color(0xFF51607A),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              OutlinedButton.icon(
+                style: appGreenOutlineButtonStyle(context),
+                onPressed: _hisaabViewLoading ? null : _pickHisaabViewDate,
+                icon: const Icon(Icons.event_outlined),
+                label: const Text('Pick Date'),
+              ),
+              OutlinedButton.icon(
+                style: appGreenOutlineButtonStyle(context),
+                onPressed: _hisaabViewLoading
+                    ? null
+                    : () => _loadHisaabImageView(force: true),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Refresh'),
+              ),
+              FilledButton.icon(
+                style: appGreenButtonStyle(context),
+                onPressed:
+                    _hisaabViewLoading ? null : _exportCurrentHisaabImage,
+                icon: const Icon(Icons.image_outlined),
+                label: const Text('Export PNG'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (_hisaabViewLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 42),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (data == null)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 28),
+              child: Text('Select or refresh a date to load the hisaab image.'),
+            )
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final scale = (constraints.maxWidth / _a4LandscapeWidth)
+                    .clamp(0.25, 1.0)
+                    .toDouble();
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    width: _a4LandscapeWidth * scale,
+                    height: _a4LandscapeHeight * scale,
+                    child: Transform.scale(
+                      scale: scale,
+                      alignment: Alignment.topLeft,
+                      child: _hisaabImageSheet(data),
+                    ),
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -594,110 +755,119 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
               physics: const ClampingScrollPhysics(),
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 20),
               children: [
-                Wrap(spacing: 12, runSpacing: 10, children: [
-                  FilledButton.icon(
-                    style: appGreenButtonStyle(context),
-                    onPressed: _exportRangeNow,
-                    icon: const Icon(Icons.save_alt),
-                    label: const Text('Export Date Range'),
-                  ),
-                  OutlinedButton.icon(
-                    style: appGreenOutlineButtonStyle(context),
-                    onPressed: () async {
-                      final dir = await subdir('daily_sales');
-                      await OpenFilex.open(dir.path);
-                    },
-                    icon: const Icon(Icons.folder_open),
-                    label: const Text('Open Daily Reports Folder'),
-                  ),
-                  OutlinedButton.icon(
-                    style: appGreenOutlineButtonStyle(context),
-                    onPressed: () async {
-                      final dir = await subdir('daily_hisaab_images');
-                      await OpenFilex.open(dir.path);
-                    },
-                    icon: const Icon(Icons.photo_library_outlined),
-                    label: const Text('Open Hisaab Images Folder'),
-                  ),
-                ]),
-                const SizedBox(height: 12),
-                AppSoftCard(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      AppSectionTitle(
-                        title: 'Daily Sales Sheets',
-                        subtitle:
-                            'Export daily sales and keep hisaab images beside them.',
-                        trailing: AppMetaChip(
-                          icon: Icons.sort,
-                          text: _sortLabel(_sortReports),
-                          backgroundColor: const Color(0xFFF3F6FA),
-                          borderColor: const Color(0xFFDCE5EE),
-                          foregroundColor: const Color(0xFF51607A),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          const Text(
-                            'Sort',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF364056),
-                            ),
-                          ),
-                          DropdownButton<SortMode>(
-                            focusNode: _sortFocusDaily,
-                            value: _sortReports,
-                            onChanged: (v) {
-                              if (v != null) {
-                                setState(() {
-                                  _sortReports = v;
-                                  _applyReportSort();
-                                });
-                                FocusScope.of(context).unfocus();
-                                _sortFocusDaily.unfocus();
-                                FocusManager.instance.primaryFocus?.unfocus();
-                              }
-                            },
-                            items: const [
-                              DropdownMenuItem(
-                                  value: SortMode.mostUnpaid,
-                                  child: Text('Most Unpaid')),
-                              DropdownMenuItem(
-                                  value: SortMode.mostPaid,
-                                  child: Text('Most Paid')),
-                              DropdownMenuItem(
-                                  value: SortMode.mostSales,
-                                  child: Text('Most Sales')),
-                              DropdownMenuItem(
-                                  value: SortMode.leastSales,
-                                  child: Text('Least Sales')),
-                              DropdownMenuItem(
-                                  value: SortMode.newestFirst,
-                                  child: Text('Newest First')),
-                              DropdownMenuItem(
-                                  value: SortMode.oldestFirst,
-                                  child: Text('Oldest First')),
-                            ],
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 14),
-                      if (_files.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 18),
-                          child: Text('No daily sales files yet'),
-                        )
-                      else
-                        ..._files.map(_reportFileTile),
-                    ],
-                  ),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _viewModeToggle(),
+                    FilledButton.icon(
+                      style: appGreenButtonStyle(context),
+                      onPressed: _exportRangeNow,
+                      icon: const Icon(Icons.save_alt),
+                      label: const Text('Export Date Range'),
+                    ),
+                    OutlinedButton.icon(
+                      style: appGreenOutlineButtonStyle(context),
+                      onPressed: () async {
+                        final dir = await subdir('daily_sales');
+                        await OpenFilex.open(dir.path);
+                      },
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('Open Daily Reports Folder'),
+                    ),
+                    OutlinedButton.icon(
+                      style: appGreenOutlineButtonStyle(context),
+                      onPressed: () async {
+                        final dir = await subdir('daily_hisaab_images');
+                        await OpenFilex.open(dir.path);
+                      },
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Open Hisaab Images Folder'),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: 12),
+                if (_showHisaabImageView)
+                  _hisaabImageViewCard()
+                else
+                  AppSoftCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AppSectionTitle(
+                          title: 'Daily Sales Sheets',
+                          subtitle:
+                              'Export daily sales and keep hisaab images beside them.',
+                          trailing: AppMetaChip(
+                            icon: Icons.sort,
+                            text: _sortLabel(_sortReports),
+                            backgroundColor: const Color(0xFFF3F6FA),
+                            borderColor: const Color(0xFFDCE5EE),
+                            foregroundColor: const Color(0xFF51607A),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            const Text(
+                              'Sort',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF364056),
+                              ),
+                            ),
+                            DropdownButton<SortMode>(
+                              focusNode: _sortFocusDaily,
+                              value: _sortReports,
+                              onChanged: (v) {
+                                if (v != null) {
+                                  setState(() {
+                                    _sortReports = v;
+                                    _applyReportSort();
+                                  });
+                                  FocusScope.of(context).unfocus();
+                                  _sortFocusDaily.unfocus();
+                                  FocusManager.instance.primaryFocus?.unfocus();
+                                }
+                              },
+                              items: const [
+                                DropdownMenuItem(
+                                    value: SortMode.mostUnpaid,
+                                    child: Text('Most Unpaid')),
+                                DropdownMenuItem(
+                                    value: SortMode.mostPaid,
+                                    child: Text('Most Paid')),
+                                DropdownMenuItem(
+                                    value: SortMode.mostSales,
+                                    child: Text('Most Sales')),
+                                DropdownMenuItem(
+                                    value: SortMode.leastSales,
+                                    child: Text('Least Sales')),
+                                DropdownMenuItem(
+                                    value: SortMode.newestFirst,
+                                    child: Text('Newest First')),
+                                DropdownMenuItem(
+                                    value: SortMode.oldestFirst,
+                                    child: Text('Oldest First')),
+                              ],
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        if (_files.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 18),
+                            child: Text('No daily sales files yet'),
+                          )
+                        else
+                          ..._files.map(_reportFileTile),
+                      ],
+                    ),
+                  ),
               ],
             ),
           ),
