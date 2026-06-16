@@ -177,6 +177,7 @@ class MobileDraftRetryService {
         'deviceId': draft.sourceDeviceId,
         'invoiceDate': draft.invoiceDate,
         'customer': draft.customer,
+        'customerDisplay': draft.customerDisplay,
         'customerId': draft.customerId,
         'contact': draft.contact,
         'address': draft.address,
