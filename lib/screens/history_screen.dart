@@ -203,7 +203,7 @@ class _HistoryScreenState extends State<HistoryScreen>
                               '${dir.path}${Platform.pathSeparator}invoice_${inv.sNo}.pdf');
                           await file.writeAsBytes(bytes, flush: true);
                           await OpenFilex.open(file.path);
-                          if (!mounted) return;
+                          if (!context.mounted) return;
                           showOk(context,
                               'Saved: ${file.path.split(Platform.pathSeparator).last}');
                         },
@@ -305,7 +305,7 @@ class _HistoryScreenState extends State<HistoryScreen>
                           } catch (_) {}
 
                           await _load();
-                          if (!mounted) return;
+                          if (!context.mounted) return;
                           showOk(context, 'Invoice deleted');
                         },
                       ),

@@ -40,6 +40,8 @@ class MobileAccessStore {
   static List<MobileTruck>? _factoryTrucksCache;
   static List<SyncLogEntry>? _syncLogsCache;
   static ServerSyncConfig? _serverConfigCache;
+  static List<MobileUserLocation>? _locationsCache;
+  static String? _locationMonitorPinCache;
   static BiometricLoginConfig? _biometricLoginConfigCache;
 
   static Future<File> _file(String name) async {
@@ -611,6 +613,99 @@ class MobileAccessStore {
     final logs = await loadSyncLogs();
     logs.insert(0, entry);
     await saveSyncLogs(logs);
+  }
+
+  static Future<List<MobileUserLocation>> loadUserLocations() async {
+    final cached = _locationsCache;
+    if (cached != null) return List<MobileUserLocation>.from(cached);
+    try {
+      final f = await _file('mobile_user_locations.json');
+      if (!await f.exists()) {
+        _locationsCache = <MobileUserLocation>[];
+        return [];
+      }
+      final raw = await _readJsonList(f);
+      final loaded = raw
+          .map((e) => MobileUserLocation.fromJson(e as Map<String, dynamic>))
+          .where((e) => e.userId.trim().isNotEmpty)
+          .toList()
+        ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
+      _locationsCache = loaded;
+      return List<MobileUserLocation>.from(loaded);
+    } catch (_) {
+      _locationsCache = <MobileUserLocation>[];
+      return [];
+    }
+  }
+
+  static Future<void> saveUserLocations(
+    List<MobileUserLocation> locations,
+  ) async {
+    final byUser = <String, MobileUserLocation>{};
+    for (final location in locations) {
+      final key = location.userId.trim().isNotEmpty
+          ? location.userId.trim()
+          : location.username.trim().toLowerCase();
+      if (key.isEmpty) continue;
+      final current = byUser[key];
+      if (current == null ||
+          location.receivedAt.compareTo(current.receivedAt) >= 0) {
+        byUser[key] = location;
+      }
+    }
+    final sorted = byUser.values.toList()
+      ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
+    _locationsCache = sorted;
+    final f = await _file('mobile_user_locations.json');
+    await f.writeAsString(
+      jsonEncode(sorted.map((e) => e.toJson()).toList()),
+    );
+    AppBus.bump();
+  }
+
+  static Future<void> upsertUserLocation(MobileUserLocation location) async {
+    final locations = await loadUserLocations();
+    final key = location.userId.trim().isNotEmpty
+        ? location.userId.trim()
+        : location.username.trim().toLowerCase();
+    final index = locations.indexWhere((existing) {
+      final existingKey = existing.userId.trim().isNotEmpty
+          ? existing.userId.trim()
+          : existing.username.trim().toLowerCase();
+      return existingKey == key;
+    });
+    if (index >= 0) {
+      locations[index] = location;
+    } else {
+      locations.add(location);
+    }
+    await saveUserLocations(locations);
+  }
+
+  static Future<String?> loadLocationMonitorPin() async {
+    if (_locationMonitorPinCache != null) return _locationMonitorPinCache;
+    try {
+      final f = await _file('location_monitor_pin.json');
+      if (!await f.exists()) return null;
+      final raw = await _readJsonMap(f);
+      final pin = (raw['pin'] ?? '').toString().trim();
+      _locationMonitorPinCache = pin.isEmpty ? null : pin;
+      return _locationMonitorPinCache;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> saveLocationMonitorPin(String pin) async {
+    final clean = pin.trim();
+    final f = await _file('location_monitor_pin.json');
+    if (clean.isEmpty) {
+      _locationMonitorPinCache = null;
+      if (await f.exists()) await f.delete();
+      return;
+    }
+    _locationMonitorPinCache = clean;
+    await f.writeAsString(jsonEncode({'pin': clean}));
   }
 
   static Future<ServerSyncConfig> loadServerConfig() async {

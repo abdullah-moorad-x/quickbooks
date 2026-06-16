@@ -193,7 +193,7 @@ class _HomeState extends State<Home> {
       case 7:
         return 'Godown opening stock and daily remaining bags';
       default:
-        return 'Mobile roles, pending drafts, and sync activity';
+        return 'Mobile roles, locations, and sync activity';
     }
   }
 

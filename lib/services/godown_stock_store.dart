@@ -366,6 +366,69 @@ class GodownStockStore {
     await saveConfig(GodownConfig(openingDate: cfg.openingDate, skus: cfg.skus, stockIns: list));
   }
 
+  static Future<void> ensureSku({
+    required String name,
+    required String category,
+  }) async {
+    final cleanName = name.trim();
+    final cleanCategory = category.trim();
+    if (cleanName.isEmpty || !kItemTypes.contains(cleanCategory)) return;
+    final cfg = await loadConfig();
+    final exists = cfg.skus.any((sku) =>
+        _skuKey(sku.name, sku.category) == _skuKey(cleanName, cleanCategory));
+    if (exists) return;
+    await saveConfig(
+      GodownConfig(
+        openingDate: cfg.openingDate,
+        skus: [
+          ...cfg.skus,
+          GodownSku(
+            name: cleanName,
+            category: cleanCategory,
+            aliases: const [],
+            openingBags: 0,
+          ),
+        ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase())),
+        stockIns: cfg.stockIns,
+      ),
+    );
+  }
+
+  static Future<void> upsertStockInEntry(GodownStockInEntry entry) async {
+    if (entry.id.trim().isEmpty ||
+        entry.date.trim().isEmpty ||
+        entry.truckNo.trim().isEmpty ||
+        entry.category.trim().isEmpty ||
+        entry.sku.trim().isEmpty ||
+        entry.qty <= 0) {
+      return;
+    }
+    await ensureSku(name: entry.sku, category: entry.category);
+    final cfg = await loadConfig();
+    final list = [
+      for (final existing in cfg.stockIns)
+        if (existing.id != entry.id) existing,
+      entry,
+    ];
+    list.sort((a, b) {
+      int d;
+      try {
+        d = parseInvoiceDate(a.date).compareTo(parseInvoiceDate(b.date));
+      } catch (_) {
+        d = a.date.compareTo(b.date);
+      }
+      if (d != 0) return d;
+      return a.id.compareTo(b.id);
+    });
+    await saveConfig(
+      GodownConfig(
+        openingDate: cfg.openingDate,
+        skus: cfg.skus,
+        stockIns: list,
+      ),
+    );
+  }
+
   static Future<void> deleteStockIn(String id) async {
     final cfg = await loadConfig();
     final list = cfg.stockIns.where((e) => e.id != id).toList();

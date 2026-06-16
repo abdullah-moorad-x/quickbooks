@@ -428,6 +428,54 @@ class ServerSyncClient {
     return saved;
   }
 
+  static Future<GodownConfig> moveTruckBalanceToGodown({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required String sourceSite,
+    required String sourceTruckId,
+    required String truckNo,
+    required String date,
+    required Map<String, int> typeBags,
+    required List<Map<String, dynamic>> stockLines,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    final Map<String, dynamic> response;
+    try {
+      response = await _requestJson(
+        Uri.parse('$normalized/godown/truck-balance'),
+        method: 'POST',
+        headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+        body: {
+          'sourceSite': sourceSite,
+          'sourceTruckId': sourceTruckId,
+          'truckNo': truckNo,
+          'date': date,
+          'typeBags': typeBags,
+          'stockLines': stockLines,
+        },
+      );
+    } on ServerSyncException catch (e) {
+      if (_isRouteNotFound(e)) {
+        throw const ServerSyncException(
+          'Godown balance move is not available on this laptop server yet. Restart the laptop app after updating it.',
+        );
+      }
+      rethrow;
+    }
+    final configJson = response['godownConfig'] is Map<String, dynamic>
+        ? response['godownConfig'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final config = GodownConfig.fromJson(configJson);
+    await GodownStockStore.saveConfig(config);
+    return config;
+  }
+
   static Future<ServerOrderSaveResult> saveOrder({
     required String baseUrl,
     required String username,
@@ -654,6 +702,37 @@ class ServerSyncClient {
       submitUri,
       method: 'DELETE',
       headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+    );
+  }
+
+  static Future<void> submitLocation({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required double latitude,
+    required double longitude,
+    required double? accuracyMeters,
+    required String capturedAt,
+    required String deviceId,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    await _requestJson(
+      Uri.parse('$normalized/locations'),
+      method: 'POST',
+      headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+      body: {
+        'sharingEnabled': true,
+        'latitude': latitude,
+        'longitude': longitude,
+        'accuracyMeters': accuracyMeters,
+        'capturedAt': capturedAt,
+        'deviceId': deviceId,
+      },
     );
   }
 

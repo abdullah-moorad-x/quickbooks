@@ -30,9 +30,12 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
   bool _savingServer = false;
   bool _startingServer = false;
   bool _loading = true;
+  bool _locationMonitorUnlocked = false;
+  bool _locationPinSet = false;
 
   List<AppUser> _users = const [];
   List<PendingInvoice> _pendingInvoices = const [];
+  List<MobileUserLocation> _locations = const [];
   List<SyncLogEntry> _logs = const [];
   ServerSyncConfig _serverConfig = const ServerSyncConfig();
   List<String> _reachableAddresses = const [];
@@ -70,18 +73,23 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     final results = await Future.wait([
       MobileAccessStore.loadUsers(),
       MobileAccessStore.loadPendingInvoices(),
+      MobileAccessStore.loadUserLocations(),
       MobileAccessStore.loadSyncLogs(),
       MobileAccessStore.loadServerConfig(),
+      MobileAccessStore.loadLocationMonitorPin(),
     ]);
-    final serverConfig = results[3] as ServerSyncConfig;
+    final serverConfig = results[4] as ServerSyncConfig;
     final addresses =
         await LocalApiServer.reachableAddresses(serverConfig.port);
     if (!mounted) return;
     setState(() {
       _users = results[0] as List<AppUser>;
       _pendingInvoices = results[1] as List<PendingInvoice>;
-      _logs = results[2] as List<SyncLogEntry>;
+      _locations = results[2] as List<MobileUserLocation>;
+      _logs = results[3] as List<SyncLogEntry>;
       _serverConfig = serverConfig;
+      _locationPinSet = ((results[5] as String?) ?? '').trim().isNotEmpty;
+      if (!_locationPinSet) _locationMonitorUnlocked = false;
       _reachableAddresses = addresses;
       _serverHostCtrl.text = _serverConfig.host;
       _serverPortCtrl.text = _serverConfig.port.toString();
@@ -330,6 +338,85 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     }
   }
 
+  Future<void> _unlockLocationMonitor() async {
+    final savedPin = await MobileAccessStore.loadLocationMonitorPin();
+    if (!mounted) return;
+    final pinCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+    final isSetup = (savedPin ?? '').trim().isEmpty;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(isSetup ? 'Set Location PIN' : 'Unlock Locations'),
+        content: SizedBox(
+          width: 320,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: pinCtrl,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: isSetup ? 'New PIN' : 'PIN',
+                ),
+              ),
+              if (isSetup) ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: confirmCtrl,
+                  obscureText: true,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Confirm PIN'),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(isSetup ? 'Save' : 'Unlock'),
+          ),
+        ],
+      ),
+    );
+    final pin = pinCtrl.text.trim();
+    final confirm = confirmCtrl.text.trim();
+    pinCtrl.dispose();
+    confirmCtrl.dispose();
+    if (!mounted) return;
+    if (ok != true) return;
+    if (pin.length < 4) {
+      showErr(context, 'PIN must be at least 4 digits.');
+      return;
+    }
+    if (isSetup) {
+      if (pin != confirm) {
+        showErr(context, 'PIN does not match.');
+        return;
+      }
+      await MobileAccessStore.saveLocationMonitorPin(pin);
+      if (!mounted) return;
+      setState(() {
+        _locationPinSet = true;
+        _locationMonitorUnlocked = true;
+      });
+      showOk(context, 'Location monitor PIN saved.');
+      return;
+    }
+    if (pin != savedPin) {
+      showErr(context, 'Wrong PIN.');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _locationMonitorUnlocked = true);
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -346,9 +433,9 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
           const SizedBox(height: 12),
           _serverConfigCard(),
           const SizedBox(height: 12),
-          _userManagementCard(),
+          _locationMonitorCard(),
           const SizedBox(height: 12),
-          _pendingInvoicesCard(),
+          _userManagementCard(),
           const SizedBox(height: 12),
           _syncLogsCard(),
         ],
@@ -357,10 +444,6 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
   }
 
   Widget _summaryRow() {
-    final pendingOnly = _pendingInvoices
-        .where((e) => e.status == PendingInvoiceStatus.pending)
-        .toList();
-    final pendingCount = pendingOnly.length;
     final activeUsers = _users.where((e) => e.active).length;
     return Wrap(
       spacing: 12,
@@ -373,17 +456,17 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
           icon: Icons.person_outline,
         ),
         _SummaryTile(
-          label: 'Pending drafts',
-          value: '$pendingCount',
-          sublabel: pendingCount == 0 ? 'Queue is clear' : 'Awaiting review',
-          icon: Icons.pending_actions_outlined,
-        ),
-        _SummaryTile(
           label: 'Sync log entries',
           value: '${_logs.length}',
           sublabel:
               _logs.isEmpty ? 'No activity yet' : 'Recent server activity',
           icon: Icons.sync_alt_outlined,
+        ),
+        _SummaryTile(
+          label: 'Live locations',
+          value: '${_locations.length}',
+          sublabel: _locations.isEmpty ? 'No shared devices' : 'Latest reports',
+          icon: Icons.location_on_outlined,
         ),
       ],
     );
@@ -590,6 +673,158 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
         ),
       ),
     );
+  }
+
+  Widget _locationMonitorCard() {
+    if (!_locationMonitorUnlocked) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Mobile User Locations',
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _locationPinSet
+                    ? 'Location monitor is locked on this laptop.'
+                    : 'Set a local PIN before viewing mobile locations.',
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: _unlockLocationMonitor,
+                icon: Icon(_locationPinSet
+                    ? Icons.lock_open_outlined
+                    : Icons.pin_outlined),
+                label: Text(_locationPinSet ? 'Unlock' : 'Set PIN'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Mobile User Locations',
+              style: Theme.of(context)
+                  .textTheme
+                  .titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Shows latest location from mobile users who enabled sharing.',
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: () =>
+                    setState(() => _locationMonitorUnlocked = false),
+                icon: const Icon(Icons.lock_outline),
+                label: const Text('Lock'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (_locations.isEmpty)
+              const Text('No mobile locations received yet.')
+            else
+              ..._locations.map(_locationTile),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _locationTile(MobileUserLocation location) {
+    final received = DateTime.tryParse(location.receivedAt);
+    final age = received == null
+        ? 'Unknown'
+        : _locationAgeLabel(DateTime.now().difference(received));
+    final accuracy = location.accuracyMeters == null
+        ? '-'
+        : '${location.accuracyMeters!.toStringAsFixed(0)} m';
+    final mapUrl =
+        'https://www.google.com/maps/search/?api=1&query=${location.latitude},${location.longitude}';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFDCE5EE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  location.displayName.trim().isEmpty
+                      ? location.username
+                      : location.displayName,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+              ),
+              AppMetaChip(
+                icon: Icons.schedule_outlined,
+                text: age,
+                foregroundColor:
+                    _isRecentLocation(received) ? Colors.green : Colors.orange,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              AppMetaChip(
+                icon: Icons.my_location_outlined,
+                text:
+                    '${location.latitude.toStringAsFixed(6)}, ${location.longitude.toStringAsFixed(6)}',
+              ),
+              AppMetaChip(
+                icon: Icons.gps_fixed_outlined,
+                text: 'Accuracy $accuracy',
+              ),
+              AppMetaChip(
+                icon: Icons.phone_android_outlined,
+                text: location.deviceId.trim().isEmpty
+                    ? 'Unknown device'
+                    : location.deviceId,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SelectableText(mapUrl),
+        ],
+      ),
+    );
+  }
+
+  bool _isRecentLocation(DateTime? received) {
+    if (received == null) return false;
+    return DateTime.now().difference(received).inMinutes <= 5;
+  }
+
+  String _locationAgeLabel(Duration age) {
+    if (age.inSeconds < 60) return 'Just now';
+    if (age.inMinutes < 60) return '${age.inMinutes} min ago';
+    if (age.inHours < 24) return '${age.inHours} hr ago';
+    return '${age.inDays} day ago';
   }
 
   Widget _pendingInvoicesCard() {

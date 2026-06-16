@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../core/app_bus.dart';
 import '../core/constants.dart';
@@ -13,10 +16,11 @@ import '../models/payment.dart';
 import 'godown_hisaab_screen.dart';
 import 'invoice_screen.dart';
 import 'payments_screen.dart';
-import '../services/mobile_draft_retry_service.dart';
 import '../services/mobile_sync_store.dart';
 import '../services/invoice_draft_suggestions.dart';
 import '../services/notification_service.dart';
+import '../services/paths.dart';
+import '../services/pdf_builder.dart';
 import '../services/server_sync_client.dart';
 import '../services/storage.dart';
 import '../utils/date.dart';
@@ -321,7 +325,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   Timer? _dataPreloadTimer;
   int _dataPreloadStep = 0;
   Timer? _orderAutoSyncTimer;
+  Timer? _locationShareTimer;
   bool _autoSyncingOrders = false;
+  bool _sendingLocation = false;
   Set<String> _knownOrderIds = const <String>{};
   Map<String, String> _knownOrderStatusKeys = const <String, String>{};
 
@@ -334,8 +340,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       ),
       if (widget.user.role != UserRole.viewer)
         (
-          builder: (_) =>
-              InvoiceScreen(mobileDraftMode: true, draftUser: widget.user),
+          builder: (_) => const InvoiceScreen(makeupInvoiceMode: true),
           icon: Icons.edit_document,
           label: 'Draft',
         ),
@@ -527,9 +532,11 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       if (!mounted) return;
       setState(() => _tabsReady = true);
       _scheduleDataPreload();
-      MobileDraftRetryService.start(widget.user);
       Future<void>.delayed(const Duration(milliseconds: 350), () {
         if (mounted) _startOrderAutoSync();
+      });
+      Future<void>.delayed(const Duration(milliseconds: 900), () {
+        if (mounted) _startLocationSharing();
       });
     });
   }
@@ -539,8 +546,8 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.user.id != widget.user.id ||
         oldWidget.user.passcode != widget.user.passcode) {
-      MobileDraftRetryService.start(widget.user);
       _startOrderAutoSync();
+      _startLocationSharing();
       _tab = 0;
       _tabCache.clear();
       _drawerChildrenCache = null;
@@ -554,7 +561,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   void dispose() {
     _dataPreloadTimer?.cancel();
     _orderAutoSyncTimer?.cancel();
-    MobileDraftRetryService.stop();
+    _locationShareTimer?.cancel();
     super.dispose();
   }
 
@@ -588,12 +595,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           await MobileAccessStore.loadSurjaniTrucks();
           break;
         case 6:
-          await MobileAccessStore.loadPendingInvoices();
-          break;
-        case 7:
           await MobileAccessStore.loadOutgoingPayments();
           break;
-        case 8:
+        case 7:
           await MobileAccessStore.loadSyncLogs();
           break;
         default:
@@ -616,6 +620,50 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
       const Duration(seconds: 5),
       (_) => unawaited(_syncOrdersInBackground()),
     );
+  }
+
+  void _startLocationSharing() {
+    _locationShareTimer?.cancel();
+    unawaited(_sendLocationIfEnabled());
+    _locationShareTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => unawaited(_sendLocationIfEnabled()),
+    );
+  }
+
+  Future<void> _sendLocationIfEnabled() async {
+    if (_sendingLocation) return;
+    _sendingLocation = true;
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      if (config.baseUrl.trim().isEmpty) return;
+      if (!await Geolocator.isLocationServiceEnabled()) return;
+      final permission = await Geolocator.checkPermission();
+      if (permission != LocationPermission.always &&
+          permission != LocationPermission.whileInUse) {
+        return;
+      }
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 12),
+        ),
+      );
+      await ServerSyncClient.submitLocation(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        accuracyMeters: position.accuracy,
+        capturedAt: position.timestamp.toIso8601String(),
+        deviceId: 'mobile-${widget.user.id}',
+      );
+    } catch (_) {
+      // Location sharing should not interrupt normal app use.
+    } finally {
+      _sendingLocation = false;
+    }
   }
 
   Future<void> _primeAndSyncOrders() async {
@@ -750,6 +798,8 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
   bool _loading = true;
   List<Invoice> _invoices = const [];
   List<PaymentEntry> _payments = const [];
+  List<MobileTruck> _surjaniTrucks = const [];
+  List<MobileTruck> _factoryTrucks = const [];
   ServerSyncConfig _syncConfig = const ServerSyncConfig();
 
   @override
@@ -775,12 +825,16 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
       Store.loadAll(),
       PaymentStore.loadAll(),
       MobileAccessStore.loadServerConfig(),
+      MobileAccessStore.loadSurjaniTrucks(),
+      MobileAccessStore.loadFactoryTrucks(),
     ]);
     if (!mounted) return;
     setState(() {
       _invoices = results[0] as List<Invoice>;
       _payments = results[1] as List<PaymentEntry>;
       _syncConfig = results[2] as ServerSyncConfig;
+      _surjaniTrucks = results[3] as List<MobileTruck>;
+      _factoryTrucks = results[4] as List<MobileTruck>;
       _loading = false;
     });
   }
@@ -879,6 +933,16 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
     final currentMonthDetails =
         _categoryDetailsForRange(currentMonthStart, detailEnd);
     final categoryDetails = _categoryDetailsForRange(detailStart, detailEnd);
+    final currentMonthIncoming =
+        _truckIncomingDetailsForRange(currentMonthStart, detailEnd);
+    final sixMonthIncoming =
+        _truckIncomingDetailsForRange(detailStart, detailEnd);
+    final currentSurjaniIncoming = currentMonthIncoming
+        .firstWhere((detail) => detail.source == 'Surjani')
+        .totalBags;
+    final currentFactoryIncoming = currentMonthIncoming
+        .firstWhere((detail) => detail.source == 'Factory')
+        .totalBags;
     final sixMonthSales =
         monthlySalesSeries.fold<double>(0, (sum, value) => sum + value);
     void openCurrentMonthStats() => _showStatsDetails(
@@ -887,6 +951,7 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
           soldBags: monthBags,
           salesAmount: currentMonthSales,
           details: currentMonthDetails,
+          incomingDetails: currentMonthIncoming,
         );
     void openSixMonthStats() => _showStatsDetails(
           title: '6-Month Stats Details',
@@ -894,6 +959,7 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
           soldBags: sixMonthBags,
           salesAmount: sixMonthSales,
           details: categoryDetails,
+          incomingDetails: sixMonthIncoming,
         );
     final monthLabels = List<String>.generate(6, (index) {
       final monthDate = DateTime(now.year, now.month - (5 - index), 1);
@@ -1027,6 +1093,23 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
                                   fontSize: 28,
                                   fontWeight: FontWeight.w700,
                                 ),
+                              ),
+                              const SizedBox(height: 8),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  _DashboardGlassStat(
+                                    label: 'Surjani in',
+                                    value:
+                                        '${fmt0(currentSurjaniIncoming)} bags',
+                                  ),
+                                  _DashboardGlassStat(
+                                    label: 'Factory in',
+                                    value:
+                                        '${fmt0(currentFactoryIncoming)} bags',
+                                  ),
+                                ],
                               ),
                               const SizedBox(height: 10),
                               _Sparkline(
@@ -1172,12 +1255,58 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
         .toList();
   }
 
+  List<_DashboardTruckIncomingDetail> _truckIncomingDetailsForRange(
+    DateTime start,
+    DateTime end,
+  ) {
+    return [
+      _truckIncomingDetailForRange('Surjani', _surjaniTrucks, start, end),
+      _truckIncomingDetailForRange('Factory', _factoryTrucks, start, end),
+    ];
+  }
+
+  _DashboardTruckIncomingDetail _truckIncomingDetailForRange(
+    String source,
+    List<MobileTruck> trucks,
+    DateTime start,
+    DateTime end,
+  ) {
+    final byType = <String, double>{
+      for (final type in kItemTypes) _canonicalDashboardCategory(type): 0,
+    };
+    var totalBags = 0.0;
+    var truckCount = 0;
+    for (final truck in trucks) {
+      DateTime date;
+      try {
+        date = parseInvoiceDate(truck.orderDate);
+      } catch (_) {
+        continue;
+      }
+      if (date.isBefore(start) || !date.isBefore(end)) continue;
+      truckCount++;
+      totalBags += truck.capacity;
+      for (final entry in truck.typeBags.entries) {
+        final category = _canonicalDashboardCategory(entry.key);
+        byType[category] = (byType[category] ?? 0) + entry.value;
+      }
+    }
+    byType.removeWhere((_, value) => value <= 0);
+    return _DashboardTruckIncomingDetail(
+      source: source,
+      truckCount: truckCount,
+      totalBags: totalBags,
+      bagsByType: byType,
+    );
+  }
+
   void _showStatsDetails({
     required String title,
     required double paymentReceived,
     required double soldBags,
     required double salesAmount,
     required List<_DashboardCategoryDetail> details,
+    required List<_DashboardTruckIncomingDetail> incomingDetails,
   }) {
     showModalBottomSheet<void>(
       context: context,
@@ -1189,6 +1318,7 @@ class _MobileDashboardTabState extends State<MobileDashboardTab> {
         soldBags: soldBags,
         salesAmount: salesAmount,
         details: details,
+        incomingDetails: incomingDetails,
       ),
     );
   }
@@ -1236,12 +1366,72 @@ class _DashboardCategoryDetail {
   }
 }
 
+class _DashboardTruckIncomingDetail {
+  final String source;
+  final int truckCount;
+  final double totalBags;
+  final Map<String, double> bagsByType;
+
+  const _DashboardTruckIncomingDetail({
+    required this.source,
+    required this.truckCount,
+    required this.totalBags,
+    required this.bagsByType,
+  });
+}
+
+class _DashboardGlassStat extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _DashboardGlassStat({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0x1FFFFFFF),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0x24FFFFFF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFFD9DDFF),
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SixMonthStatsDetailSheet extends StatelessWidget {
   final String title;
   final double paymentReceived;
   final double soldBags;
   final double salesAmount;
   final List<_DashboardCategoryDetail> details;
+  final List<_DashboardTruckIncomingDetail> incomingDetails;
 
   const _SixMonthStatsDetailSheet({
     required this.title,
@@ -1249,6 +1439,7 @@ class _SixMonthStatsDetailSheet extends StatelessWidget {
     required this.soldBags,
     required this.salesAmount,
     required this.details,
+    required this.incomingDetails,
   });
 
   @override
@@ -1334,6 +1525,8 @@ class _SixMonthStatsDetailSheet extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 18),
+              _IncomingTruckSection(rows: incomingDetails),
+              const SizedBox(height: 12),
               _DetailSection(
                 title: 'Cement',
                 rows: cementRows,
@@ -1398,6 +1591,109 @@ class _DetailTotalTile extends StatelessWidget {
               fontSize: 11,
               fontWeight: FontWeight.w600,
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _IncomingTruckSection extends StatelessWidget {
+  final List<_DashboardTruckIncomingDetail> rows;
+
+  const _IncomingTruckSection({required this.rows});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE6E9F2)),
+      ),
+      child: Column(
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 14, 14, 8),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.local_shipping_outlined,
+                  size: 18,
+                  color: Color(0xFF17A673),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Incoming Trucks',
+                  style: TextStyle(
+                    color: Color(0xFF1C2140),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFFE6E9F2)),
+          for (var i = 0; i < rows.length; i++) ...[
+            _IncomingTruckRow(detail: rows[i]),
+            if (i != rows.length - 1)
+              const Divider(height: 1, color: Color(0xFFE6E9F2)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _IncomingTruckRow extends StatelessWidget {
+  final _DashboardTruckIncomingDetail detail;
+
+  const _IncomingTruckRow({required this.detail});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  detail.source,
+                  style: const TextStyle(
+                    color: Color(0xFF273247),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              Text(
+                '${fmt0(detail.totalBags)} bags',
+                style: const TextStyle(
+                  color: Color(0xFF17A673),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _MiniStatPill(
+                label: 'Trucks',
+                value: '${detail.truckCount}',
+                color: const Color(0xFF17A673),
+              ),
+              for (final entry in detail.bagsByType.entries)
+                _MiniStatPill(
+                  label: _dashboardCategoryLabel(entry.key),
+                  value: '${fmt0(entry.value)} bags',
+                  color: const Color(0xFF5B63F6),
+                ),
+            ],
           ),
         ],
       ),
@@ -2909,6 +3205,42 @@ class _SurjaniTruckColumn {
   }
 }
 
+class _TruckBalanceStockLine {
+  final String category;
+  final String sku;
+  final int qty;
+
+  const _TruckBalanceStockLine({
+    required this.category,
+    required this.sku,
+    required this.qty,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'category': category,
+        'sku': sku,
+        'qty': qty,
+      };
+}
+
+class _TruckBalanceBrandRow {
+  final String category;
+  final TextEditingController brandCtrl;
+  final TextEditingController qtyCtrl;
+
+  _TruckBalanceBrandRow({
+    required this.category,
+    String brand = '',
+    String qty = '',
+  })  : brandCtrl = TextEditingController(text: brand),
+        qtyCtrl = TextEditingController(text: qty);
+
+  void dispose() {
+    brandCtrl.dispose();
+    qtyCtrl.dispose();
+  }
+}
+
 class _MobileOrdersTabState extends State<MobileOrdersTab> {
   bool _loading = true;
   bool _syncing = false;
@@ -3090,6 +3422,251 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
       if (b[entry.key] != entry.value) return false;
     }
     return true;
+  }
+
+  Map<String, int> _truckBalanceByType(
+    _SurjaniTruckColumn truck,
+    List<MobileOrder> allocations,
+  ) {
+    final balances = Map<String, int>.from(truck.typeBags);
+    for (final order in allocations) {
+      if (order.status == MobileOrderStatus.cancelled) continue;
+      final type = order.bagsType.trim();
+      if (!balances.containsKey(type)) continue;
+      balances[type] = (balances[type] ?? 0) - order.bagsQuantity;
+    }
+    balances.removeWhere((_, qty) => qty <= 0);
+    return balances;
+  }
+
+  Future<void> _moveTruckBalanceToGodown({
+    required String sourceSite,
+    required _SurjaniTruckColumn truck,
+    required List<MobileOrder> allocations,
+  }) async {
+    final balanceByType = _truckBalanceByType(truck, allocations);
+    if (balanceByType.isEmpty) {
+      showErr(context, 'No typed balance bags to move.');
+      return;
+    }
+    final stockLines = await _showTruckBalanceBrandDialog(balanceByType);
+    if (stockLines == null || stockLines.isEmpty) return;
+    if (!mounted) return;
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      await ServerSyncClient.moveTruckBalanceToGodown(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        sourceSite: sourceSite,
+        sourceTruckId: truck.id,
+        truckNo: truck.numberCtrl.text.trim(),
+        date: _selectedOrderDate,
+        typeBags: balanceByType,
+        stockLines: stockLines.map((line) => line.toJson()).toList(),
+      );
+      if (!mounted) return;
+      showOk(context, 'Moved balance to Godown.');
+    } on ServerSyncException catch (e) {
+      if (!mounted) return;
+      showErr(context, e.message);
+    }
+  }
+
+  Future<List<_TruckBalanceStockLine>?> _showTruckBalanceBrandDialog(
+    Map<String, int> balanceByType,
+  ) async {
+    final rows = <_TruckBalanceBrandRow>[
+      for (final entry in balanceByType.entries)
+        _TruckBalanceBrandRow(
+          category: entry.key,
+          qty: '${entry.value}',
+        ),
+    ];
+    String? error;
+    final lines = await showDialog<List<_TruckBalanceStockLine>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          int totalFor(String category) {
+            return rows
+                .where((row) => row.category == category)
+                .fold<int>(
+                  0,
+                  (sum, row) =>
+                      sum + (int.tryParse(row.qtyCtrl.text.trim()) ?? 0),
+                );
+          }
+
+          return AlertDialog(
+            title: const Text('Move balance to Godown'),
+            content: SizedBox(
+              width: 360,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final entry in balanceByType.entries) ...[
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '${entry.key} remaining ${entry.value}',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                          ),
+                          Text(
+                            '${totalFor(entry.key)} / ${entry.value}',
+                            style: TextStyle(
+                              color: totalFor(entry.key) == entry.value
+                                  ? const Color(0xFF17A673)
+                                  : const Color(0xFFE15241),
+                              fontWeight: FontWeight.w800,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      for (final row
+                          in rows.where((row) => row.category == entry.key))
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: row.brandCtrl,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Brand',
+                                    isDense: true,
+                                  ),
+                                  onChanged: (_) =>
+                                      setDialogState(() => error = null),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              SizedBox(
+                                width: 78,
+                                child: TextField(
+                                  controller: row.qtyCtrl,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Qty',
+                                    isDense: true,
+                                  ),
+                                  onChanged: (_) =>
+                                      setDialogState(() => error = null),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Remove brand',
+                                visualDensity: const VisualDensity(
+                                  horizontal: -4,
+                                  vertical: -4,
+                                ),
+                                onPressed: rows
+                                            .where((item) =>
+                                                item.category == entry.key)
+                                            .length <=
+                                        1
+                                    ? null
+                                    : () {
+                                        setDialogState(() {
+                                          rows.remove(row);
+                                          error = null;
+                                        });
+                                        unawaited(
+                                          Future<void>.delayed(
+                                            const Duration(milliseconds: 400),
+                                            row.dispose,
+                                          ),
+                                        );
+                                      },
+                                icon: const Icon(Icons.close, size: 18),
+                              ),
+                            ],
+                          ),
+                        ),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: () {
+                            setDialogState(() {
+                              rows.add(
+                                _TruckBalanceBrandRow(category: entry.key),
+                              );
+                              error = null;
+                            });
+                          },
+                          icon: const Icon(Icons.add, size: 18),
+                          label: const Text('Brand'),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    if (error != null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          error!,
+                          style: const TextStyle(color: Color(0xFFE15241)),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final parsed = <_TruckBalanceStockLine>[];
+                  for (final entry in balanceByType.entries) {
+                    final typeRows =
+                        rows.where((row) => row.category == entry.key);
+                    var total = 0;
+                    for (final row in typeRows) {
+                      final brand = row.brandCtrl.text.trim();
+                      final qty = int.tryParse(row.qtyCtrl.text.trim()) ?? 0;
+                      if (brand.isEmpty || qty <= 0) {
+                        setDialogState(() => error =
+                            'Enter brand and qty for ${entry.key}.');
+                        return;
+                      }
+                      total += qty;
+                      parsed.add(_TruckBalanceStockLine(
+                        category: entry.key,
+                        sku: brand,
+                        qty: qty,
+                      ));
+                    }
+                    if (total != entry.value) {
+                      setDialogState(() => error =
+                          '${entry.key} brand qty must total ${entry.value}.');
+                      return;
+                    }
+                  }
+                  Navigator.of(dialogContext).pop(parsed);
+                },
+                child: const Text('Move'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    final disposableRows = rows.toList();
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {
+      for (final row in disposableRows) {
+        row.dispose();
+      }
+    }));
+    return lines;
   }
 
   Future<void> _saveSurjaniTrucks({bool syncToServer = true}) async {
@@ -3303,9 +3880,11 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     final customerName = order.customerName.trim();
     final brand = order.bagsBrand.trim();
     final note = order.note.trim();
+    final recordedInvoiceNo = order.recordedInvoiceNo;
     final meta = [
       if (customerName.isNotEmpty) customerName,
       if (brand.isNotEmpty) brand,
+      if (recordedInvoiceNo != null) 'Invoice #$recordedInvoiceNo',
     ].join(' - ');
     if (meta.isEmpty && note.isEmpty) {
       return null;
@@ -3377,6 +3956,10 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     required bool compact,
   }) {
     final subtitle = _orderSubtitle(order, compact: compact);
+    var quantityLabel = '${order.bagsQuantity} ${order.bagsType}';
+    if (zeroCancelled && order.status == MobileOrderStatus.cancelled) {
+      quantityLabel = '0 ${order.bagsType}';
+    }
     return Padding(
       padding: EdgeInsets.only(bottom: compact ? 4 : 6),
       child: AppPressable(
@@ -3400,15 +3983,11 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
               style: compact ? const TextStyle(fontSize: 13) : null,
             ),
             subtitle: subtitle,
-            trailing: Text(
-              zeroCancelled && order.status == MobileOrderStatus.cancelled
-                  ? '0 ${order.bagsType}'
-                  : '${order.bagsQuantity} ${order.bagsType}',
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.w800,
-                fontSize: compact ? 12 : null,
-              ),
+            trailing: _orderTrailing(
+              quantityLabel: quantityLabel,
+              recordedInvoiceNo: order.recordedInvoiceNo,
+              color: color,
+              compact: compact,
             ),
             shape: RoundedRectangleBorder(
               side: BorderSide(color: color, width: 1),
@@ -3417,6 +3996,45 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _orderTrailing({
+    required String quantityLabel,
+    required int? recordedInvoiceNo,
+    required Color color,
+    required bool compact,
+  }) {
+    final qtyText = Text(
+      quantityLabel,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      textAlign: TextAlign.end,
+      style: TextStyle(
+        color: color,
+        fontWeight: FontWeight.w800,
+        fontSize: compact ? 12 : null,
+      ),
+    );
+    if (recordedInvoiceNo == null) return qtyText;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        qtyText,
+        Text(
+          'REC #$recordedInvoiceNo',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.end,
+          style: TextStyle(
+            color: color.withValues(alpha: .82),
+            fontSize: compact ? 9 : 10,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
     );
   }
 
@@ -3633,20 +4251,18 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
               ],
             ),
             SizedBox(height: compact ? 6 : 10),
+            TextField(
+              controller: _newSurjaniTruckNoCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Truck no',
+                isDense: true,
+              ),
+            ),
+            SizedBox(height: compact ? 6 : 8),
             Row(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _newSurjaniTruckNoCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Truck no',
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(width: compact ? 6 : 8),
                 SizedBox(
-                  width: compact ? 78 : 96,
+                  width: compact ? 92 : 110,
                   child: TextField(
                     controller: _newSurjaniTruckQtyCtrl,
                     keyboardType: TextInputType.number,
@@ -3656,6 +4272,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                     ),
                   ),
                 ),
+                const Spacer(),
                 IconButton(
                   tooltip: 'Add truck',
                   onPressed: _addSurjaniTruck,
@@ -3742,20 +4359,18 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
               ],
             ),
             SizedBox(height: compact ? 6 : 10),
+            TextField(
+              controller: _newFactoryTruckNoCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Truck no',
+                isDense: true,
+              ),
+            ),
+            SizedBox(height: compact ? 6 : 8),
             Row(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _newFactoryTruckNoCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Truck no',
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(width: compact ? 6 : 8),
                 SizedBox(
-                  width: compact ? 78 : 96,
+                  width: compact ? 92 : 110,
                   child: TextField(
                     controller: _newFactoryTruckQtyCtrl,
                     keyboardType: TextInputType.number,
@@ -3765,6 +4380,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                     ),
                   ),
                 ),
+                const Spacer(),
                 IconButton(
                   tooltip: 'Add truck',
                   onPressed: _addFactoryTruck,
@@ -3869,6 +4485,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     );
     final balance = truck.capacity - load;
     final typeBalance = truck.capacity - truck.allottedTypeBags;
+    final balanceByType = _truckBalanceByType(truck, allocations);
     return Padding(
       padding: EdgeInsets.only(bottom: compact ? 6 : 8),
       child: DragTarget<MobileOrder>(
@@ -3890,59 +4507,63 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                 hover ? const Color(0xFFDFF4EF) : const Color(0xFFF8FBFB),
             borderColor:
                 hover ? const Color(0xFF00838F) : const Color(0xFFE2EAED),
-            title: Row(
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  flex: compact ? 7 : 8,
-                  child: TextField(
-                    controller: truck.numberCtrl,
-                    onEditingComplete: _saveSurjaniTrucks,
-                    decoration: InputDecoration(
-                      labelText: index == 0 ? 'Truck no' : 'Truck ${index + 1}',
-                      isDense: true,
+                TextField(
+                  controller: truck.numberCtrl,
+                  onEditingComplete: _saveSurjaniTrucks,
+                  decoration: InputDecoration(
+                    labelText: index == 0 ? 'Truck no' : 'Truck ${index + 1}',
+                    isDense: true,
+                  ),
+                ),
+                SizedBox(height: compact ? 6 : 8),
+                Row(
+                  children: [
+                    SizedBox(
+                      width: compact ? 82 : 96,
+                      child: TextField(
+                        controller: truck.qtyCtrl,
+                        keyboardType: TextInputType.number,
+                        onEditingComplete: () {
+                          setState(() {});
+                          _saveSurjaniTrucks();
+                        },
+                        decoration: const InputDecoration(
+                          labelText: 'Qty',
+                          isDense: true,
+                        ),
+                        onChanged: (_) => setState(() {}),
+                      ),
                     ),
-                  ),
-                ),
-                SizedBox(width: compact ? 5 : 8),
-                SizedBox(
-                  width: compact ? 64 : 76,
-                  child: TextField(
-                    controller: truck.qtyCtrl,
-                    keyboardType: TextInputType.number,
-                    onEditingComplete: () {
-                      setState(() {});
-                      _saveSurjaniTrucks();
-                    },
-                    decoration:
-                        const InputDecoration(labelText: 'Qty', isDense: true),
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-                SizedBox(width: compact ? 5 : 8),
-                ConstrainedBox(
-                  constraints: BoxConstraints(minWidth: compact ? 54 : 68),
-                  child: Text(
-                    '$load / ${truck.capacity}',
-                    textAlign: TextAlign.right,
-                    style: TextStyle(fontSize: compact ? 12 : null),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Allot bag types',
-                  onPressed: () =>
-                      _editTruckTypeSplit(truck, onSave: _saveSurjaniTrucks),
-                  visualDensity: compact
-                      ? const VisualDensity(horizontal: -4, vertical: -4)
-                      : null,
-                  icon: const Icon(Icons.category_outlined),
-                ),
-                IconButton(
-                  tooltip: 'Delete truck',
-                  onPressed: () => _deleteTruckSlot(index),
-                  visualDensity: compact
-                      ? const VisualDensity(horizontal: -4, vertical: -4)
-                      : null,
-                  icon: const Icon(Icons.delete_outline),
+                    SizedBox(width: compact ? 8 : 10),
+                    Expanded(
+                      child: Text(
+                        '$load / ${truck.capacity}',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          fontSize: compact ? 12 : null,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    _truckActionMenu(
+                      compact: compact,
+                      onEditTypes: () => _editTruckTypeSplit(
+                        truck,
+                        onSave: _saveSurjaniTrucks,
+                      ),
+                      onMoveBalance: balanceByType.isEmpty
+                          ? null
+                          : () => _moveTruckBalanceToGodown(
+                                sourceSite: 'Surjani',
+                                truck: truck,
+                                allocations: allocations,
+                              ),
+                      onDelete: () => _deleteTruckSlot(index),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -3967,6 +4588,12 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                       ),
                       for (final entry in truck.typeBags.entries)
                         AppMetaChip(text: '${entry.key} ${entry.value}'),
+                      if (balanceByType.isNotEmpty)
+                        AppMetaChip(
+                          icon: Icons.inventory_2_outlined,
+                          text:
+                              'Godown ${balanceByType.values.fold<int>(0, (sum, qty) => sum + qty)}',
+                        ),
                     ],
                   ),
                 ),
@@ -4003,6 +4630,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     );
     final balance = truck.capacity - load;
     final typeBalance = truck.capacity - truck.allottedTypeBags;
+    final balanceByType = _truckBalanceByType(truck, allocations);
     return Padding(
       padding: EdgeInsets.only(bottom: compact ? 6 : 8),
       child: DragTarget<MobileOrder>(
@@ -4024,59 +4652,63 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                 hover ? const Color(0xFFDFF4EF) : const Color(0xFFF8FBFB),
             borderColor:
                 hover ? const Color(0xFF00838F) : const Color(0xFFE2EAED),
-            title: Row(
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  flex: compact ? 7 : 8,
-                  child: TextField(
-                    controller: truck.numberCtrl,
-                    onEditingComplete: _saveFactoryTrucks,
-                    decoration: InputDecoration(
-                      labelText: index == 0 ? 'Truck no' : 'Truck ${index + 1}',
-                      isDense: true,
+                TextField(
+                  controller: truck.numberCtrl,
+                  onEditingComplete: _saveFactoryTrucks,
+                  decoration: InputDecoration(
+                    labelText: index == 0 ? 'Truck no' : 'Truck ${index + 1}',
+                    isDense: true,
+                  ),
+                ),
+                SizedBox(height: compact ? 6 : 8),
+                Row(
+                  children: [
+                    SizedBox(
+                      width: compact ? 82 : 96,
+                      child: TextField(
+                        controller: truck.qtyCtrl,
+                        keyboardType: TextInputType.number,
+                        onEditingComplete: () {
+                          setState(() {});
+                          _saveFactoryTrucks();
+                        },
+                        decoration: const InputDecoration(
+                          labelText: 'Qty',
+                          isDense: true,
+                        ),
+                        onChanged: (_) => setState(() {}),
+                      ),
                     ),
-                  ),
-                ),
-                SizedBox(width: compact ? 5 : 8),
-                SizedBox(
-                  width: compact ? 64 : 76,
-                  child: TextField(
-                    controller: truck.qtyCtrl,
-                    keyboardType: TextInputType.number,
-                    onEditingComplete: () {
-                      setState(() {});
-                      _saveFactoryTrucks();
-                    },
-                    decoration:
-                        const InputDecoration(labelText: 'Qty', isDense: true),
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-                SizedBox(width: compact ? 5 : 8),
-                ConstrainedBox(
-                  constraints: BoxConstraints(minWidth: compact ? 54 : 68),
-                  child: Text(
-                    '$load / ${truck.capacity}',
-                    textAlign: TextAlign.right,
-                    style: TextStyle(fontSize: compact ? 12 : null),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Allot bag types',
-                  onPressed: () =>
-                      _editTruckTypeSplit(truck, onSave: _saveFactoryTrucks),
-                  visualDensity: compact
-                      ? const VisualDensity(horizontal: -4, vertical: -4)
-                      : null,
-                  icon: const Icon(Icons.category_outlined),
-                ),
-                IconButton(
-                  tooltip: 'Delete truck',
-                  onPressed: () => _deleteFactoryTruckSlot(index),
-                  visualDensity: compact
-                      ? const VisualDensity(horizontal: -4, vertical: -4)
-                      : null,
-                  icon: const Icon(Icons.delete_outline),
+                    SizedBox(width: compact ? 8 : 10),
+                    Expanded(
+                      child: Text(
+                        '$load / ${truck.capacity}',
+                        textAlign: TextAlign.right,
+                        style: TextStyle(
+                          fontSize: compact ? 12 : null,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    _truckActionMenu(
+                      compact: compact,
+                      onEditTypes: () => _editTruckTypeSplit(
+                        truck,
+                        onSave: _saveFactoryTrucks,
+                      ),
+                      onMoveBalance: balanceByType.isEmpty
+                          ? null
+                          : () => _moveTruckBalanceToGodown(
+                                sourceSite: 'Factory',
+                                truck: truck,
+                                allocations: allocations,
+                              ),
+                      onDelete: () => _deleteFactoryTruckSlot(index),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -4101,6 +4733,12 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                       ),
                       for (final entry in truck.typeBags.entries)
                         AppMetaChip(text: '${entry.key} ${entry.value}'),
+                      if (balanceByType.isNotEmpty)
+                        AppMetaChip(
+                          icon: Icons.inventory_2_outlined,
+                          text:
+                              'Godown ${balanceByType.values.fold<int>(0, (sum, qty) => sum + qty)}',
+                        ),
                     ],
                   ),
                 ),
@@ -4118,6 +4756,62 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
           );
         },
       ),
+    );
+  }
+
+  Widget _truckActionMenu({
+    required bool compact,
+    required VoidCallback onEditTypes,
+    required VoidCallback? onMoveBalance,
+    required VoidCallback onDelete,
+  }) {
+    return PopupMenuButton<String>(
+      tooltip: 'Truck actions',
+      icon: const Icon(Icons.more_vert),
+      iconSize: compact ? 20 : 24,
+      onSelected: (value) {
+        switch (value) {
+          case 'types':
+            onEditTypes();
+            break;
+          case 'godown':
+            onMoveBalance?.call();
+            break;
+          case 'delete':
+            onDelete();
+            break;
+        }
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: 'types',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.category_outlined),
+            title: Text('Allot bag types'),
+          ),
+        ),
+        PopupMenuItem(
+          value: 'godown',
+          enabled: onMoveBalance != null,
+          child: const ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.inventory_2_outlined),
+            title: Text('Move balance to Godown'),
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'delete',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_outline, color: Color(0xFFB42318)),
+            title: Text('Delete truck'),
+          ),
+        ),
+      ],
     );
   }
 
@@ -4592,18 +5286,38 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
     }
   }
 
-  Future<void> _openDraftFromOrder() async {
-    final order = widget.order;
-    if (order == null || order.status != MobileOrderStatus.delivered) return;
-    await Navigator.of(context).push<void>(
-      MaterialPageRoute(
-        builder: (_) => InvoiceScreen(
-          mobileDraftMode: true,
-          draftUser: widget.user,
-          initialOrderDraft: order,
+  Future<void> _sendRecordedInvoicePdf() async {
+    final invoiceNo = widget.order?.recordedInvoiceNo;
+    if (invoiceNo == null) return;
+    setState(() => _saving = true);
+    try {
+      final invoices = await Store.loadAll();
+      final invoice = invoices.cast<Invoice?>().firstWhere(
+            (item) => item != null && item.sNo == invoiceNo,
+            orElse: () => null,
+          );
+      if (invoice == null) {
+        if (!mounted) return;
+        showErr(context, 'Invoice #$invoiceNo not found. Sync and try again.');
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _saving = false);
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => InvoiceScreen(
+            editing: true,
+            initialInvoice: invoice,
+            pdfOnlyShare: true,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      if (!mounted) return;
+      showErr(context, 'Could not open invoice: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 
   Future<void> _deleteOrder() async {
@@ -4896,15 +5610,24 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
                   'Marked by',
                   widget.order!.statusUpdatedByName,
                 ),
+                if (widget.order!.recordedInvoiceNo != null) ...[
+                  _detailRow(
+                    'Recorded',
+                    'Invoice #${widget.order!.recordedInvoiceNo}',
+                  ),
+                  _detailRow(
+                    'Recorded at',
+                    widget.order!.recordedInvoiceAt ?? '-',
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 12),
-            if (widget.order!.status == MobileOrderStatus.delivered) ...[
+            if (widget.order!.recordedInvoiceNo != null) ...[
               FilledButton.icon(
-                onPressed: _saving ? null : _openDraftFromOrder,
-                style: appGreenButtonStyle(context),
-                icon: const Icon(Icons.receipt_long_outlined),
-                label: const Text('Draft invoice'),
+                onPressed: _saving ? null : _sendRecordedInvoicePdf,
+                icon: const Icon(Icons.picture_as_pdf_outlined),
+                label: const Text('Send Invoice'),
               ),
               const SizedBox(height: 12),
             ],
@@ -4946,6 +5669,10 @@ class _MobileSyncSettingsTabState extends State<MobileSyncSettingsTab> {
   bool _pulling = false;
   bool _fullSyncing = false;
   bool _resetting = false;
+  bool _checkingLocation = false;
+  bool _requestingLocation = false;
+  bool _locationServiceEnabled = false;
+  LocationPermission _locationPermission = LocationPermission.unableToDetermine;
   ServerSyncConfig _config = const ServerSyncConfig();
 
   @override
@@ -4962,12 +5689,72 @@ class _MobileSyncSettingsTabState extends State<MobileSyncSettingsTab> {
 
   Future<void> _load() async {
     final config = await MobileAccessStore.loadServerConfig();
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final permission = await Geolocator.checkPermission();
     if (!mounted) return;
     setState(() {
       _config = config;
       _baseUrlCtrl.text = config.baseUrl;
+      _locationServiceEnabled = serviceEnabled;
+      _locationPermission = permission;
       _loading = false;
     });
+  }
+
+  Future<void> _refreshLocationPermission() async {
+    setState(() => _checkingLocation = true);
+    final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    final permission = await Geolocator.checkPermission();
+    if (!mounted) return;
+    setState(() {
+      _locationServiceEnabled = serviceEnabled;
+      _locationPermission = permission;
+      _checkingLocation = false;
+    });
+  }
+
+  Future<void> _requestAlwaysLocation() async {
+    setState(() => _requestingLocation = true);
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        await Geolocator.openLocationSettings();
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.whileInUse) {
+        permission = await Geolocator.requestPermission();
+      }
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!mounted) return;
+      setState(() {
+        _locationServiceEnabled = serviceEnabled;
+        _locationPermission = permission;
+      });
+      if (permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.whileInUse) {
+        await Geolocator.openAppSettings();
+      }
+    } finally {
+      if (mounted) setState(() => _requestingLocation = false);
+    }
+  }
+
+  String _locationPermissionLabel() {
+    if (!_locationServiceEnabled) return 'Location service off';
+    switch (_locationPermission) {
+      case LocationPermission.always:
+        return 'Always allowed';
+      case LocationPermission.whileInUse:
+        return 'Allowed while using app';
+      case LocationPermission.denied:
+        return 'Not allowed';
+      case LocationPermission.deniedForever:
+        return 'Blocked in settings';
+      case LocationPermission.unableToDetermine:
+        return 'Not checked';
+    }
   }
 
   Future<void> _save() async {
@@ -5134,6 +5921,59 @@ class _MobileSyncSettingsTabState extends State<MobileSyncSettingsTab> {
             ),
           ),
         ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Location Permission',
+                  style: Theme.of(context)
+                      .textTheme
+                      .titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                AppMetaChip(
+                  icon: Icons.location_on_outlined,
+                  text: _locationPermissionLabel(),
+                  foregroundColor:
+                      _locationPermission == LocationPermission.always
+                          ? const Color(0xFF17A673)
+                          : const Color(0xFFE6A700),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    FilledButton.icon(
+                      onPressed:
+                          _requestingLocation ? null : _requestAlwaysLocation,
+                      icon: const Icon(Icons.my_location_outlined),
+                      label: Text(_requestingLocation
+                          ? 'Requesting...'
+                          : 'Allow always'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _checkingLocation ? null : _refreshLocationPermission,
+                      icon: const Icon(Icons.refresh),
+                      label: Text(_checkingLocation ? 'Checking...' : 'Check'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: Geolocator.openAppSettings,
+                      icon: const Icon(Icons.settings_outlined),
+                      label: const Text('App settings'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -5143,6 +5983,24 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
   final Invoice invoice;
 
   const MobileInvoiceDetailScreen({super.key, required this.invoice});
+
+  Future<void> _sendPdf(BuildContext context) async {
+    try {
+      final bytes = await PdfBuilder.build(invoice);
+      final dir = await subdir('invoices');
+      final file = File(
+        '${dir.path}${Platform.pathSeparator}invoice_${invoice.sNo}.pdf',
+      );
+      await file.writeAsBytes(bytes, flush: true);
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text: 'Invoice #${invoice.sNo}',
+      );
+    } catch (_) {
+      if (!context.mounted) return;
+      showErr(context, 'Could not send PDF.');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -5164,6 +6022,12 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
               _detailRow('Address', invoice.address),
               _detailRow('Site', invoice.site),
               _detailRow('Date', invoice.date),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => _sendPdf(context),
+                icon: const Icon(Icons.ios_share_outlined),
+                label: const Text('Send PDF'),
+              ),
             ],
           ),
           const SizedBox(height: 12),

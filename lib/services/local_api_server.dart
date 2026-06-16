@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../core/constants.dart';
 import '../models/customer.dart';
 import '../models/invoice.dart';
 import '../models/mobile_access.dart';
@@ -616,6 +618,152 @@ class LocalApiServer {
           'factoryTrucks': kept.map((e) => e.toJson()).toList(),
         });
       }
+      if (request.method == 'POST' && path == '/godown/truck-balance') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        final body = await utf8.decodeStream(request);
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid JSON body.'},
+          );
+        }
+        final sourceSite = (decoded['sourceSite'] ?? '').toString().trim();
+        final sourceTruckId =
+            (decoded['sourceTruckId'] ?? '').toString().trim();
+        final truckNo = (decoded['truckNo'] ?? '').toString().trim();
+        final date = (decoded['date'] ?? '').toString().trim();
+        final rawTypeBags = decoded['typeBags'];
+        final rawStockLines = decoded['stockLines'];
+        if (sourceSite.isEmpty ||
+            sourceTruckId.isEmpty ||
+            truckNo.isEmpty ||
+            date.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Truck, date, and balance bags are required.'},
+          );
+        }
+        if (rawTypeBags is! Map) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Balance bags are required.'},
+          );
+        }
+        try {
+          parseInvoiceDate(date);
+        } catch (_) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid stock date.'},
+          );
+        }
+        final cleanBalances = <String, int>{};
+        rawTypeBags.forEach((key, value) {
+          final category = key.toString().trim();
+          final qty = value is num
+              ? value.toInt()
+              : int.tryParse(value.toString()) ?? 0;
+          if (kItemTypes.contains(category) && qty > 0) {
+            cleanBalances[category] = qty;
+          }
+        });
+        if (cleanBalances.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'No balance bags to move.'},
+          );
+        }
+        final stockLines = <GodownStockInEntry>[];
+        if (rawStockLines is List) {
+          for (final rawLine in rawStockLines) {
+            if (rawLine is! Map) continue;
+            final category = (rawLine['category'] ?? '').toString().trim();
+            final sku = (rawLine['sku'] ?? '').toString().trim();
+            final qty = rawLine['qty'] is num
+                ? (rawLine['qty'] as num).toDouble()
+                : double.tryParse((rawLine['qty'] ?? '').toString()) ?? 0;
+            if (!kItemTypes.contains(category) || sku.isEmpty || qty <= 0) {
+              continue;
+            }
+            stockLines.add(
+              GodownStockInEntry(
+                id: '',
+                date: date,
+                truckNo: truckNo,
+                category: category,
+                sku: sku,
+                qty: qty,
+                note: '$sourceSite truck balance moved to Godown',
+              ),
+            );
+          }
+        }
+        if (stockLines.isEmpty) {
+          for (final entry in cleanBalances.entries) {
+            stockLines.add(
+              GodownStockInEntry(
+                id: '',
+                date: date,
+                truckNo: truckNo,
+                category: entry.key,
+                sku: 'Truck Balance',
+                qty: entry.value.toDouble(),
+                note: '$sourceSite truck balance moved to Godown',
+              ),
+            );
+          }
+        }
+        final siteKey = sourceSite.toLowerCase().replaceAll(' ', '-');
+        final truckKey =
+            sourceTruckId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+        final dateKey = date.replaceAll(RegExp(r'[^0-9]'), '');
+        for (final line in stockLines) {
+          final categoryKey = line.category.replaceAll(' ', '-');
+          final skuKey = line.sku.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
+          await GodownStockStore.upsertStockInEntry(
+            GodownStockInEntry(
+              id: 'GBAL-$dateKey-$siteKey-$truckKey-$categoryKey-$skuKey',
+              date: line.date,
+              truckNo: line.truckNo,
+              category: line.category,
+              sku: line.sku,
+              qty: line.qty,
+              note: line.note,
+            ),
+          );
+        }
+        final godownConfig = await GodownStockStore.loadConfig();
+        await MobileAccessStore.addSyncLog(
+          SyncLogEntry(
+            id: MobileAccessStore.nextSyncLogId(),
+            createdAt: DateTime.now().toIso8601String(),
+            direction: SyncLogDirection.incoming,
+            status: SyncLogStatus.success,
+            entityType: 'godown-stock',
+            entityId: sourceTruckId,
+            summary: 'Moved truck balance to Godown',
+            details:
+                '$sourceSite $truckNo - ${stockLines.map((e) => '${e.category} ${e.sku} ${e.qty.toStringAsFixed(0)}').join(', ')}',
+          ),
+        );
+        return _writeJson(request, HttpStatus.ok, {
+          'ok': true,
+          'godownConfig': godownConfig.toJson(),
+        });
+      }
       if (request.method == 'POST' && path == '/orders/status') {
         final user = await _authorizedUser(request);
         if (user == null) {
@@ -659,7 +807,7 @@ class LocalApiServer {
         }
         final now = DateTime.now().toIso8601String();
         final statusChanged = requestedStatus != existing.status;
-        final order = existing.copyWith(
+        var order = existing.copyWith(
           updatedAt: now,
           updatedByUserId: user.id,
           updatedByName: user.displayName,
@@ -670,8 +818,12 @@ class LocalApiServer {
         );
         await MobileAccessStore.upsertOrder(order);
         if (statusChanged && order.status != MobileOrderStatus.pending) {
-          await NotificationService.showOrderStatusChanged(order);
+          unawaited(NotificationService.showOrderStatusChanged(order));
         }
+        unawaited(_syncOrderInvoiceAndSave(
+          order,
+          createIfMissing: statusChanged,
+        ));
         await MobileAccessStore.addSyncLog(
           SyncLogEntry(
             id: MobileAccessStore.nextSyncLogId(),
@@ -710,7 +862,14 @@ class LocalApiServer {
           );
         }
         final orders = await MobileAccessStore.loadOrders();
-        final existed = orders.any((order) => order.id == orderId);
+        final existing = orders.cast<MobileOrder?>().firstWhere(
+              (order) => order != null && order.id == orderId,
+              orElse: () => null,
+            );
+        final existed = existing != null;
+        if (existing?.recordedInvoiceNo != null) {
+          await _deleteRecordedOrderInvoice(existing!);
+        }
         await MobileAccessStore.deleteOrder(orderId);
         await MobileAccessStore.addSyncLog(
           SyncLogEntry(
@@ -803,7 +962,7 @@ class LocalApiServer {
         }
         final now = DateTime.now().toIso8601String();
         final isNewOrder = existing == null;
-        final order = (existing ??
+        var order = (existing ??
                 MobileOrder(
                   id: id.isEmpty ? MobileAccessStore.nextOrderId() : id,
                   createdAt: now,
@@ -846,12 +1005,16 @@ class LocalApiServer {
           statusUpdatedByUserId: statusChanged ? user.id : null,
           statusUpdatedByName: statusChanged ? user.displayName : null,
         );
-        await MobileAccessStore.upsertOrder(order);
         if (isNewOrder) {
           await NotificationService.showNewOrder(order);
         } else if (statusChanged && order.status != MobileOrderStatus.pending) {
           await NotificationService.showOrderStatusChanged(order);
         }
+        order = await _syncDeliveredOrderInvoice(
+          order,
+          createIfMissing: isNewOrder || statusChanged,
+        );
+        await MobileAccessStore.upsertOrder(order);
         await MobileAccessStore.addSyncLog(
           SyncLogEntry(
             id: MobileAccessStore.nextSyncLogId(),
@@ -964,6 +1127,59 @@ class LocalApiServer {
           'status': pending.status.name,
         });
       }
+      if (request.method == 'POST' && path == '/locations') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        final body = await utf8.decodeStream(request);
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid JSON body.'},
+          );
+        }
+        if (decoded['sharingEnabled'] != true) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Location sharing is not enabled.'},
+          );
+        }
+        final lat = (decoded['latitude'] as num?)?.toDouble();
+        final lon = (decoded['longitude'] as num?)?.toDouble();
+        if (lat == null || lon == null) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Latitude and longitude are required.'},
+          );
+        }
+        final now = DateTime.now().toIso8601String();
+        final location = MobileUserLocation(
+          userId: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          deviceId: (decoded['deviceId'] ?? '').toString(),
+          latitude: lat,
+          longitude: lon,
+          accuracyMeters: (decoded['accuracyMeters'] as num?)?.toDouble(),
+          capturedAt: (decoded['capturedAt'] ?? now).toString(),
+          receivedAt: now,
+          sharingEnabled: true,
+        );
+        await MobileAccessStore.upsertUserLocation(location);
+        return _writeJson(request, HttpStatus.ok, {
+          'ok': true,
+          'receivedAt': now,
+        });
+      }
       return _writeJson(
         request,
         HttpStatus.notFound,
@@ -1014,6 +1230,262 @@ class LocalApiServer {
     final id = payment.id.trim();
     if (id.isNotEmpty) return id;
     return '${payment.date}|${payment.customerId}|${payment.customer}|${payment.amount}|${payment.type.name}';
+  }
+
+  static Future<void> _syncOrderInvoiceAndSave(
+    MobileOrder order, {
+    required bool createIfMissing,
+  }) async {
+    try {
+      final synced = await _syncDeliveredOrderInvoice(
+        order,
+        createIfMissing: createIfMissing,
+      );
+      await MobileAccessStore.upsertOrder(synced);
+    } catch (e) {
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: DateTime.now().toIso8601String(),
+          direction: SyncLogDirection.local,
+          status: SyncLogStatus.error,
+          entityType: 'invoice',
+          entityId: order.id,
+          summary: 'Could not auto-record delivered order',
+          details: e.toString(),
+        ),
+      );
+    }
+  }
+
+  static Future<MobileOrder> _syncDeliveredOrderInvoice(MobileOrder order,
+      {required bool createIfMissing}) async {
+    final recordedInvoiceNo = order.recordedInvoiceNo;
+    if (recordedInvoiceNo != null) {
+      if (order.status != MobileOrderStatus.delivered) {
+        await _deleteRecordedOrderInvoice(order);
+        return order.copyWith(clearRecordedInvoice: true);
+      }
+      await _updateRecordedOrderInvoice(order, recordedInvoiceNo);
+      return order;
+    }
+    if (!createIfMissing || order.status != MobileOrderStatus.delivered) {
+      return order;
+    }
+    final customerName = order.customerName.trim();
+    if (customerName.isEmpty) return order;
+
+    final customer = await _customerForDeliveredOrder(customerName);
+    if (customer == null) return order;
+
+    final DateTime parsedOrderDate;
+    try {
+      parsedOrderDate = parseInvoiceDate(order.orderDate);
+    } catch (_) {
+      return order;
+    }
+
+    final rate = await _latestRateForOrder(customer, order);
+    if (rate <= 0) return order;
+
+    final now = DateTime.now().toIso8601String();
+    final invoiceDate = formatInvoiceDate(parsedOrderDate);
+    final nextNo = await Store.nextSerial();
+    final invoice = Invoice(
+      sNo: nextNo,
+      date: invoiceDate,
+      customer: customer.name,
+      customerDisplay: customer.displayName.trim().isEmpty
+          ? customer.name
+          : customer.displayName,
+      customerId: customer.id,
+      contact: customer.contact,
+      address: order.plotNo,
+      site: order.orderSite,
+      lines: [
+        ItemLine(
+          order.bagsType,
+          brand: order.bagsBrand,
+          qty: order.bagsQuantity,
+          rate: rate,
+        ),
+      ],
+      cartage: 0,
+      paid: 0,
+      walkIn: false,
+    );
+    await Store.upsertInvoice(invoice);
+    queueInvoiceReportRefresh(
+      dates: {parsedOrderDate},
+      months: {parsedOrderDate},
+      customerKeys: {invoice.customerId, invoice.customer},
+    );
+
+    final recorded = order.copyWith(
+      recordedInvoiceNo: nextNo,
+      recordedInvoiceAt: now,
+    );
+    await MobileAccessStore.addSyncLog(
+      SyncLogEntry(
+        id: MobileAccessStore.nextSyncLogId(),
+        createdAt: now,
+        direction: SyncLogDirection.local,
+        status: SyncLogStatus.success,
+        entityType: 'invoice',
+        entityId: '$nextNo',
+        summary: 'Auto-recorded delivered order as invoice #$nextNo',
+        details: 'Order ${order.id} - ${customer.name}',
+      ),
+    );
+    return recorded;
+  }
+
+  static Future<void> _updateRecordedOrderInvoice(
+    MobileOrder order,
+    int invoiceNo,
+  ) async {
+    final invoices = await Store.loadAll();
+    final index = invoices.indexWhere((invoice) => invoice.sNo == invoiceNo);
+    if (index < 0) return;
+    final existing = invoices[index];
+    final customer = await _customerForDeliveredOrder(order.customerName);
+    final DateTime parsedOrderDate;
+    try {
+      parsedOrderDate = parseInvoiceDate(order.orderDate);
+    } catch (_) {
+      return;
+    }
+    final latestRate =
+        customer == null ? 0.0 : await _latestRateForOrder(customer, order);
+    final existingRate =
+        existing.lines.isEmpty ? 0.0 : existing.lines.first.rate;
+    final invoice = Invoice(
+      sNo: existing.sNo,
+      date: formatInvoiceDate(parsedOrderDate),
+      customer: customer?.name ?? existing.customer,
+      customerDisplay: customer == null
+          ? existing.customerDisplay
+          : (customer.displayName.trim().isEmpty
+              ? customer.name
+              : customer.displayName),
+      customerId: customer?.id ?? existing.customerId,
+      contact: customer?.contact ?? existing.contact,
+      address: order.plotNo,
+      site: order.orderSite,
+      lines: [
+        ItemLine(
+          order.bagsType,
+          brand: order.bagsBrand,
+          qty: order.bagsQuantity,
+          rate: latestRate > 0 ? latestRate : existingRate,
+        ),
+      ],
+      cartage: existing.cartage,
+      paid: existing.paid,
+      walkIn: existing.walkIn,
+      walkInPaymentType: existing.walkInPaymentType,
+      walkInPaymentNote: existing.walkInPaymentNote,
+      walkInBank: existing.walkInBank,
+      walkInChequeNo: existing.walkInChequeNo,
+      walkInTxnId: existing.walkInTxnId,
+      walkInBankMode: existing.walkInBankMode,
+    );
+    await Store.upsertInvoice(invoice);
+    queueInvoiceReportRefresh(
+      dates: {parsedOrderDate},
+      months: {parsedOrderDate},
+      customerKeys: {invoice.customerId, invoice.customer},
+    );
+  }
+
+  static Future<void> _deleteRecordedOrderInvoice(MobileOrder order) async {
+    final invoiceNo = order.recordedInvoiceNo;
+    if (invoiceNo == null) return;
+    final removed = await Store.deleteInvoice(invoiceNo);
+    if (removed == null) return;
+    DateTime? parsedDate;
+    try {
+      parsedDate = parseInvoiceDate(removed.date);
+    } catch (_) {
+      parsedDate = null;
+    }
+    if (parsedDate != null) {
+      queueInvoiceReportRefresh(
+        dates: {parsedDate},
+        months: {parsedDate},
+        customerKeys: {removed.customerId, removed.customer},
+      );
+    }
+    await MobileAccessStore.addSyncLog(
+      SyncLogEntry(
+        id: MobileAccessStore.nextSyncLogId(),
+        createdAt: DateTime.now().toIso8601String(),
+        direction: SyncLogDirection.local,
+        status: SyncLogStatus.success,
+        entityType: 'invoice',
+        entityId: '$invoiceNo',
+        summary: 'Deleted auto-recorded invoice #$invoiceNo',
+        details: 'Order ${order.id}',
+      ),
+    );
+  }
+
+  static Future<Customer?> _customerForDeliveredOrder(
+      String customerName) async {
+    final needle = customerName.trim().toLowerCase();
+    if (needle.isEmpty) return null;
+    final customers = await CustomerStore.loadActive();
+    for (final customer in customers) {
+      if (customer.name.trim().toLowerCase() == needle ||
+          customer.displayName.trim().toLowerCase() == needle) {
+        return customer;
+      }
+    }
+    return null;
+  }
+
+  static Future<double> _latestRateForOrder(
+    Customer customer,
+    MobileOrder order,
+  ) async {
+    final invoices = await Store.loadAll();
+    final customerIdKey = customer.id.trim().toLowerCase();
+    final customerNameKey = customer.name.trim().toLowerCase();
+    final displayNameKey = customer.displayName.trim().toLowerCase();
+    final typeKey = order.bagsType.trim().toLowerCase();
+    DateTime? latestDate;
+    var latestRate = 0.0;
+    for (final invoice in invoices) {
+      final invoiceId = invoice.customerId.trim().toLowerCase();
+      final invoiceName = invoice.customer.trim().toLowerCase();
+      final invoiceDisplay =
+          (invoice.customerDisplay ?? '').trim().toLowerCase();
+      final sameCustomer =
+          (customerIdKey.isNotEmpty && invoiceId == customerIdKey) ||
+              (customerNameKey.isNotEmpty && invoiceName == customerNameKey) ||
+              (displayNameKey.isNotEmpty && invoiceDisplay == displayNameKey);
+      if (!sameCustomer) continue;
+
+      final invoiceDate = DateTime.tryParse(invoice.date) ??
+          (() {
+            try {
+              return parseInvoiceDate(invoice.date);
+            } catch (_) {
+              return null;
+            }
+          })();
+      if (invoiceDate == null) continue;
+      if (latestDate != null && !invoiceDate.isAfter(latestDate)) continue;
+
+      for (final line in invoice.lines) {
+        if (line.typeLabel.trim().toLowerCase() == typeKey && line.rate > 0) {
+          latestDate = invoiceDate;
+          latestRate = line.rate;
+          break;
+        }
+      }
+    }
+    return latestRate;
   }
 
   static Future<int> approvePendingInvoice(

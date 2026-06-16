@@ -24,6 +24,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>QuickBill uses location permission to keep mobile device access trusted while using the app.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>QuickBill uses location permission to keep mobile device access trusted while using the app.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

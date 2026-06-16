@@ -1217,7 +1217,7 @@ class _CustomerMasterScreenState extends State<CustomerMasterScreen>
                   onPressed: () async {
                     final file = await customerWorkbookFileFromKey(c.id);
                     final exists = await file.exists();
-                    if (!mounted) return;
+                    if (!context.mounted) return;
                     if (exists) {
                       await OpenFilex.open(file.path);
                     } else {

@@ -33,6 +33,8 @@ class InvoiceScreen extends StatefulWidget {
   final MobileOrder? initialOrderDraft;
   final bool editing;
   final bool mobileDraftMode;
+  final bool pdfOnlyShare;
+  final bool makeupInvoiceMode;
   final AppUser? draftUser;
 
   const InvoiceScreen({
@@ -42,6 +44,8 @@ class InvoiceScreen extends StatefulWidget {
     this.initialOrderDraft,
     this.editing = false,
     this.mobileDraftMode = false,
+    this.pdfOnlyShare = false,
+    this.makeupInvoiceMode = false,
     this.draftUser,
   });
   @override
@@ -52,6 +56,9 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     with AutomaticKeepAliveClientMixin {
   Invoice? _originalInvoice;
   bool get _isEditing => widget.editing && widget.initialInvoice != null;
+  bool get _isPdfOnlyShare => widget.pdfOnlyShare && widget.initialInvoice != null;
+  bool get _isMakeupInvoice => widget.makeupInvoiceMode;
+  bool get _isPdfSendOnly => _isPdfOnlyShare || _isMakeupInvoice;
   bool get _isPendingDraftEdit => widget.initialPendingDraft != null;
   bool get _isMobileDraftMode => widget.mobileDraftMode;
   bool get _isDraftFlow => _isMobileDraftMode || _isPendingDraftEdit;
@@ -903,6 +910,53 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     }
   }
 
+  Future<void> _sharePdfOnly() async {
+    try {
+      if (!_validateInvoiceInputs()) return;
+      final snapshotLines = await _snapshotLinesForSave();
+      if (snapshotLines == null) return;
+      final base = widget.initialInvoice;
+      final customerName = _customer.text.trim();
+      final inv = Invoice(
+        sNo: _sNo,
+        date: _date.text.trim(),
+        customer: base?.customer ?? customerName,
+        customerDisplay: customerName,
+        customerId: base?.customerId ??
+            (_customerId.text.trim().isNotEmpty
+                ? _customerId.text.trim()
+                : customerName),
+        contact: _contact.text.trim(),
+        address: _address.text.trim(),
+        site: _site,
+        lines: snapshotLines,
+        cartage: _cartageVal,
+        paid: base?.paid ?? 0,
+        walkIn: base?.walkIn ?? false,
+        walkInPaymentType: base?.walkInPaymentType,
+        walkInPaymentNote: base?.walkInPaymentNote,
+        walkInBank: base?.walkInBank,
+        walkInChequeNo: base?.walkInChequeNo,
+        walkInTxnId: base?.walkInTxnId,
+        walkInBankMode: base?.walkInBankMode,
+      );
+      final pdfBytes = await PdfBuilder.build(inv);
+      final invDir = await subdir('invoices');
+      final pdfFile =
+          File('${invDir.path}${Platform.pathSeparator}invoice_${inv.sNo}.pdf');
+      final written = await safeWriteBytes(pdfFile, pdfBytes);
+      await Share.shareXFiles(
+        [XFile(written.path)],
+        text: 'Invoice #${inv.sNo}',
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop(inv);
+    } catch (_) {
+      if (!mounted) return;
+      showErr(context, 'Could not create PDF.');
+    }
+  }
+
   Future<void> _submitDraft({required bool openShare}) async {
     final user = widget.draftUser;
     if (!_isMobileDraftMode || user == null) {
@@ -1165,7 +1219,9 @@ class _InvoiceScreenState extends State<InvoiceScreen>
             Row(children: [
               Expanded(
                 child: AppSectionTitle(
-                  title: _isDraftFlow
+                  title: _isMakeupInvoice
+                      ? 'Makeup Invoice'
+                      : _isDraftFlow
                       ? (_isPendingDraftEdit
                           ? 'Draft ${widget.initialPendingDraft!.draftCode}'
                           : 'Draft Invoice')
@@ -1324,7 +1380,12 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                   setState(() => _site = v ?? kShipmentSites.first),
               decoration: const InputDecoration(labelText: 'Shipment Site'),
             ),
-            if (_isDraftFlow) ...[
+            if (_isMakeupInvoice) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'Use this to prepare and send a PDF only. It will not be saved in records.',
+              ),
+            ] else if (_isDraftFlow) ...[
               const SizedBox(height: 12),
               Text(
                 _isPendingDraftEdit
@@ -1427,30 +1488,38 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                               ? 'Save changes back to the pending draft'
                               : _isMobileDraftMode
                                   ? 'Submit this invoice as a pending draft'
-                                  : 'Save invoice without generating a PDF',
+                                  : _isPdfSendOnly
+                                      ? 'Create and share a PDF without changing records'
+                                      : 'Save invoice without generating a PDF',
                           child: FilledButton.icon(
                             onPressed: _isPendingDraftEdit
                                 ? _savePendingDraftEdit
                                 : _isMobileDraftMode
                                     ? () => _submitDraft(openShare: false)
-                                    : _saveInvoice,
+                                    : _isPdfSendOnly
+                                        ? _sharePdfOnly
+                                        : _saveInvoice,
                             style: appGreenButtonStyle(context),
                             icon: Icon(_isPendingDraftEdit
                                 ? Icons.save_outlined
                                 : _isMobileDraftMode
                                     ? Icons.send_outlined
-                                    : Icons.save_outlined),
+                                    : _isPdfSendOnly
+                                        ? Icons.picture_as_pdf_outlined
+                                        : Icons.save_outlined),
                             label: Text(
                                 _isPendingDraftEdit
                                     ? 'Save Draft'
                                     : _isMobileDraftMode
                                         ? 'Submit Draft'
-                                        : 'Save Invoice',
+                                        : _isPdfSendOnly
+                                            ? 'Send PDF'
+                                            : 'Save Invoice',
                                 overflow: TextOverflow.ellipsis),
                           ),
                         ),
                       ),
-                      if (!_isPendingDraftEdit) ...[
+                      if (!_isPendingDraftEdit && !_isPdfSendOnly) ...[
                         const SizedBox(width: 10),
                         Expanded(
                           child: Tooltip(

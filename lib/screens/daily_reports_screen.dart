@@ -9,6 +9,7 @@ import 'package:open_filex/open_filex.dart';
 import '../core/enums.dart';
 import '../services/excel_service.dart';
 import '../services/godown_stock_store.dart';
+import '../services/mobile_sync_store.dart';
 import '../services/paths.dart';
 import '../services/storage.dart';
 import '../utils/date.dart';
@@ -69,6 +70,10 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
   bool _sameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
   DateTime _dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+  String _truckSortKey(_TruckSaleDetailRow row) {
+    final truck = row.truckNo.trim();
+    return truck.isEmpty ? 'zzzzzz' : truck.toLowerCase();
+  }
 
   Future<void> _load() async {
     final files = await listDailyReports();
@@ -137,11 +142,16 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
 
   Future<_HisaabImageData> _buildHisaabImageData(DateTime day) async {
     final invoices = await Store.loadAll();
+    final orders = await MobileAccessStore.loadOrders();
     final cfg = await GodownStockStore.loadConfig();
     final stockReport = await GodownStockStore.buildReport(until: day);
+    final ordersByInvoiceNo = {
+      for (final order in orders)
+        if (order.recordedInvoiceNo != null) order.recordedInvoiceNo!: order,
+    };
 
-    final surjaniDetails = <_SurjaniDetailRow>[];
-    final factoryMap = <String, double>{};
+    final surjaniDetails = <_TruckSaleDetailRow>[];
+    final factoryRows = <_TruckSaleDetailRow>[];
     final godownRows = <_GodownDetailRow>[];
     for (final inv in invoices) {
       DateTime d;
@@ -152,22 +162,39 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
       }
       if (!_sameDay(d, day)) continue;
       final site = inv.site.trim().toLowerCase();
+      final order = ordersByInvoiceNo[inv.sNo];
+      final truckNo = (order?.assignedTruckNo.trim().isNotEmpty ?? false)
+          ? order!.assignedTruckNo.trim()
+          : ((order?.assignedTruckId.trim().isNotEmpty ?? false)
+              ? order!.assignedTruckId.trim()
+              : '');
       for (final l in inv.lines) {
         if (l.qty <= 0) continue;
         final sku = l.brand.trim().isEmpty ? '-' : l.brand.trim();
-        final key = '${l.typeLabel}|$sku';
         if (site == 'surjani') {
           final name = inv.customer.trim();
           final address = inv.address.trim().isEmpty ? '-' : inv.address.trim();
-          surjaniDetails.add(_SurjaniDetailRow(
+          surjaniDetails.add(_TruckSaleDetailRow(
+            truckNo: truckNo,
             name: name.isEmpty ? '-' : name,
             address: address,
             category: l.typeLabel.trim().isEmpty ? '-' : l.typeLabel.trim(),
             brand: sku,
             qty: l.qty.toDouble(),
+            rate: l.rate,
           ));
         } else if (site == 'factory') {
-          factoryMap[key] = (factoryMap[key] ?? 0) + l.qty.toDouble();
+          final name = inv.customer.trim();
+          final address = inv.address.trim().isEmpty ? '-' : inv.address.trim();
+          factoryRows.add(_TruckSaleDetailRow(
+            truckNo: truckNo,
+            name: name.isEmpty ? '-' : name,
+            address: address,
+            category: l.typeLabel.trim().isEmpty ? '-' : l.typeLabel.trim(),
+            brand: sku,
+            qty: l.qty.toDouble(),
+            rate: l.rate,
+          ));
         } else if (site == 'godown') {
           final name = inv.customer.trim();
           final address = inv.address.trim().isEmpty ? '-' : inv.address.trim();
@@ -177,6 +204,7 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
             category: l.typeLabel,
             sku: sku,
             qty: l.qty.toDouble(),
+            rate: l.rate,
           ));
         }
       }
@@ -187,6 +215,15 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
       return a.address.toLowerCase().compareTo(b.address.toLowerCase());
     });
     surjaniDetails.sort((a, b) {
+      final t = _truckSortKey(a).compareTo(_truckSortKey(b));
+      if (t != 0) return t;
+      final c = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      if (c != 0) return c;
+      return a.address.toLowerCase().compareTo(b.address.toLowerCase());
+    });
+    factoryRows.sort((a, b) {
+      final t = _truckSortKey(a).compareTo(_truckSortKey(b));
+      if (t != 0) return t;
       final c = a.name.toLowerCase().compareTo(b.name.toLowerCase());
       if (c != 0) return c;
       return a.address.toLowerCase().compareTo(b.address.toLowerCase());
@@ -207,23 +244,6 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
     stockInToday.sort(
         (a, b) => a.truckNo.toLowerCase().compareTo(b.truckNo.toLowerCase()));
 
-    List<_QtyLine> asLines(Map<String, double> map) {
-      final out = <_QtyLine>[];
-      for (final e in map.entries) {
-        final parts = e.key.split('|');
-        out.add(_QtyLine(
-            category: parts.first,
-            sku: parts.length > 1 ? parts[1] : '-',
-            qty: e.value));
-      }
-      out.sort((a, b) {
-        final c = a.category.toLowerCase().compareTo(b.category.toLowerCase());
-        if (c != 0) return c;
-        return a.sku.toLowerCase().compareTo(b.sku.toLowerCase());
-      });
-      return out;
-    }
-
     final endRows = <_StockRow>[];
     for (final r in stockReport.dailyRows) {
       if (!_sameDay(r.date, day)) continue;
@@ -240,7 +260,7 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
       day: day,
       surjaniDetails: surjaniDetails,
       stockInLines: stockInToday,
-      factoryLines: asLines(factoryMap),
+      factoryRows: factoryRows,
       godownSaleRows: godownRows,
       endOfDayStock: endRows,
     );
@@ -448,29 +468,73 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
         style: _lineStyle, maxLines: 1, overflow: TextOverflow.ellipsis);
   }
 
-  Widget _qtyLinesBlock(String title, List<_QtyLine> lines) {
-    final total = lines.fold<double>(0, (s, e) => s + e.qty);
+  Widget _truckHeaderLine(String text) {
+    return Text(
+      text,
+      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _truckSaleBlock(
+    String title,
+    List<_TruckSaleDetailRow> rows, {
+    required int maxRows,
+  }) {
+    final total = rows.fold<double>(0, (s, e) => s + e.qty);
+    final groups = <String, List<_TruckSaleDetailRow>>{};
+    for (final row in rows) {
+      final truck =
+          row.truckNo.trim().isEmpty ? 'No truck' : row.truckNo.trim();
+      (groups[truck] ??= <_TruckSaleDetailRow>[]).add(row);
+    }
+    final truckNames = groups.keys.toList()
+      ..sort((a, b) {
+        if (a == 'No truck' && b != 'No truck') return 1;
+        if (b == 'No truck' && a != 'No truck') return -1;
+        return a.toLowerCase().compareTo(b.toLowerCase());
+      });
+    final children = <Widget>[
+      Text(title, style: _sectionTitleStyle),
+      const SizedBox(height: 3),
+      Text('Total: ${total.toStringAsFixed(0)}', style: _totalStyle),
+      const SizedBox(height: 3),
+    ];
+    if (rows.isEmpty) {
+      children.add(const Text('No entries', style: _mutedStyle));
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      );
+    }
+    var shown = 0;
+    for (final truck in truckNames) {
+      if (shown >= maxRows) break;
+      final truckRows = groups[truck]!;
+      final truckTotal = truckRows.fold<double>(0, (s, e) => s + e.qty);
+      children.add(_truckHeaderLine(
+        '$truck (${truckTotal.toStringAsFixed(0)})',
+      ));
+      for (final row in truckRows) {
+        if (shown >= maxRows) break;
+        children.add(_compactLine(
+          '${row.name} | ${row.address} | ${row.category} ${row.brand} | ${row.qty.toStringAsFixed(0)} @ ${_rateText(row.rate)}',
+        ));
+        shown++;
+      }
+    }
+    if (rows.length > shown) {
+      children.add(const Text('...more', style: _mutedStyle));
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title, style: _sectionTitleStyle),
-        const SizedBox(height: 3),
-        Text('Total: ${total.toStringAsFixed(0)}', style: _totalStyle),
-        const SizedBox(height: 3),
-        if (lines.isEmpty)
-          const Text('No entries', style: _mutedStyle)
-        else
-          ...lines.take(24).map((e) => _compactLine(
-              '${e.category} | ${e.sku}: ${e.qty.toStringAsFixed(0)}')),
-        if (lines.length > 24) const Text('...more', style: _mutedStyle),
-      ],
+      children: children,
     );
   }
 
   Widget _hisaabImageSheet(_HisaabImageData data) {
     final stockTotal = data.endOfDayStock.fold<double>(0, (s, e) => s + e.qty);
-    final surjaniTotal =
-        data.surjaniDetails.fold<double>(0, (s, e) => s + e.qty);
     return Container(
       width: _a4LandscapeWidth,
       height: _a4LandscapeHeight,
@@ -501,27 +565,10 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text('Surjani Details',
-                                    style: _sectionTitleStyle),
-                                const SizedBox(height: 3),
-                                Text(
-                                    'Total: ${surjaniTotal.toStringAsFixed(0)}',
-                                    style: _totalStyle),
-                                const SizedBox(height: 3),
-                                if (data.surjaniDetails.isEmpty)
-                                  const Text('No entries', style: _mutedStyle)
-                                else
-                                  ...data.surjaniDetails
-                                      .take(22)
-                                      .map((r) => _compactLine(
-                                            '${r.name} | ${r.address} | ${r.category} ${r.brand} | ${r.qty.toStringAsFixed(0)}',
-                                          )),
-                                if (data.surjaniDetails.length > 22)
-                                  const Text('...more', style: _mutedStyle),
-                              ],
+                            _truckSaleBlock(
+                              'Surjani Details',
+                              data.surjaniDetails,
+                              maxRows: 22,
                             ),
                             const SizedBox(height: 14),
                             Column(
@@ -548,7 +595,11 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
                               ],
                             ),
                             const SizedBox(height: 14),
-                            _qtyLinesBlock('Factory Sales', data.factoryLines),
+                            _truckSaleBlock(
+                              'Factory Sales',
+                              data.factoryRows,
+                              maxRows: 18,
+                            ),
                           ],
                         ),
                       ),
@@ -575,7 +626,7 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
                                     ...data.godownSaleRows
                                         .take(32)
                                         .map((r) => _compactLine(
-                                              '${r.name} | ${r.address} | ${r.category} ${r.sku} | ${r.qty.toStringAsFixed(0)}',
+                                              '${r.name} | ${r.address} | ${r.category} ${r.sku} | ${r.qty.toStringAsFixed(0)} @ ${_rateText(r.rate)}',
                                             )),
                                   if (data.godownSaleRows.length > 32)
                                     const Padding(
@@ -1079,14 +1130,13 @@ class _DailyReportsScreenState extends State<DailyReportsScreen>
         return 'Oldest First';
     }
   }
-}
 
-class _QtyLine {
-  final String category;
-  final String sku;
-  final double qty;
-  const _QtyLine(
-      {required this.category, required this.sku, required this.qty});
+  String _rateText(double rate) {
+    if (rate <= 0) return '0';
+    return rate == rate.roundToDouble()
+        ? rate.toStringAsFixed(0)
+        : rate.toStringAsFixed(2);
+  }
 }
 
 class _StockInLine {
@@ -1107,12 +1157,14 @@ class _GodownDetailRow {
   final String category;
   final String sku;
   final double qty;
+  final double rate;
   const _GodownDetailRow({
     required this.name,
     required this.address,
     required this.category,
     required this.sku,
     required this.qty,
+    required this.rate,
   });
 }
 
@@ -1126,9 +1178,9 @@ class _StockRow {
 
 class _HisaabImageData {
   final DateTime day;
-  final List<_SurjaniDetailRow> surjaniDetails;
+  final List<_TruckSaleDetailRow> surjaniDetails;
   final List<_StockInLine> stockInLines;
-  final List<_QtyLine> factoryLines;
+  final List<_TruckSaleDetailRow> factoryRows;
   final List<_GodownDetailRow> godownSaleRows;
   final List<_StockRow> endOfDayStock;
 
@@ -1136,23 +1188,27 @@ class _HisaabImageData {
     required this.day,
     required this.surjaniDetails,
     required this.stockInLines,
-    required this.factoryLines,
+    required this.factoryRows,
     required this.godownSaleRows,
     required this.endOfDayStock,
   });
 }
 
-class _SurjaniDetailRow {
+class _TruckSaleDetailRow {
+  final String truckNo;
   final String name;
   final String address;
   final String category;
   final String brand;
   final double qty;
-  const _SurjaniDetailRow({
+  final double rate;
+  const _TruckSaleDetailRow({
+    required this.truckNo,
     required this.name,
     required this.address,
     required this.category,
     required this.brand,
     required this.qty,
+    required this.rate,
   });
 }

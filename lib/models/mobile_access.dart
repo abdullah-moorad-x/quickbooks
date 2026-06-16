@@ -161,6 +161,61 @@ class MobileDevice {
       );
 }
 
+class MobileUserLocation {
+  final String userId;
+  final String username;
+  final String displayName;
+  final String deviceId;
+  final double latitude;
+  final double longitude;
+  final double? accuracyMeters;
+  final String capturedAt;
+  final String receivedAt;
+  final bool sharingEnabled;
+
+  const MobileUserLocation({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.deviceId,
+    required this.latitude,
+    required this.longitude,
+    this.accuracyMeters,
+    required this.capturedAt,
+    required this.receivedAt,
+    this.sharingEnabled = true,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'userId': userId,
+        'username': username,
+        'displayName': displayName,
+        'deviceId': deviceId,
+        'latitude': latitude,
+        'longitude': longitude,
+        'accuracyMeters': accuracyMeters,
+        'capturedAt': capturedAt,
+        'receivedAt': receivedAt,
+        'sharingEnabled': sharingEnabled,
+      };
+
+  static MobileUserLocation fromJson(Map<String, dynamic> json) =>
+      MobileUserLocation(
+        userId: (json['userId'] ?? '').toString(),
+        username: (json['username'] ?? '').toString(),
+        displayName: (json['displayName'] ?? '').toString(),
+        deviceId: (json['deviceId'] ?? '').toString(),
+        latitude: (json['latitude'] as num?)?.toDouble() ?? 0,
+        longitude: (json['longitude'] as num?)?.toDouble() ?? 0,
+        accuracyMeters: (json['accuracyMeters'] as num?)?.toDouble(),
+        capturedAt: (json['capturedAt'] ?? '').toString(),
+        receivedAt: (json['receivedAt'] ?? '').toString(),
+        sharingEnabled: json['sharingEnabled'] is bool
+            ? json['sharingEnabled'] as bool
+            : true,
+      );
+}
+
 class PendingInvoiceLine {
   final String typeLabel;
   final String brand;
@@ -461,6 +516,8 @@ class MobileOrder {
   final String statusUpdatedAt;
   final String statusUpdatedByUserId;
   final String statusUpdatedByName;
+  final int? recordedInvoiceNo;
+  final String? recordedInvoiceAt;
 
   const MobileOrder({
     required this.id,
@@ -484,6 +541,8 @@ class MobileOrder {
     required this.statusUpdatedAt,
     required this.statusUpdatedByUserId,
     required this.statusUpdatedByName,
+    this.recordedInvoiceNo,
+    this.recordedInvoiceAt,
   });
 
   MobileOrder copyWith({
@@ -508,6 +567,9 @@ class MobileOrder {
     String? statusUpdatedAt,
     String? statusUpdatedByUserId,
     String? statusUpdatedByName,
+    int? recordedInvoiceNo,
+    String? recordedInvoiceAt,
+    bool clearRecordedInvoice = false,
   }) {
     return MobileOrder(
       id: id ?? this.id,
@@ -532,6 +594,12 @@ class MobileOrder {
       statusUpdatedByUserId:
           statusUpdatedByUserId ?? this.statusUpdatedByUserId,
       statusUpdatedByName: statusUpdatedByName ?? this.statusUpdatedByName,
+      recordedInvoiceNo: clearRecordedInvoice
+          ? null
+          : (recordedInvoiceNo ?? this.recordedInvoiceNo),
+      recordedInvoiceAt: clearRecordedInvoice
+          ? null
+          : (recordedInvoiceAt ?? this.recordedInvoiceAt),
     );
   }
 
@@ -557,6 +625,8 @@ class MobileOrder {
         'statusUpdatedAt': statusUpdatedAt,
         'statusUpdatedByUserId': statusUpdatedByUserId,
         'statusUpdatedByName': statusUpdatedByName,
+        'recordedInvoiceNo': recordedInvoiceNo,
+        'recordedInvoiceAt': recordedInvoiceAt,
       };
 
   static MobileOrder fromJson(Map<String, dynamic> json) => MobileOrder(
@@ -589,6 +659,11 @@ class MobileOrder {
         statusUpdatedByName:
             (json['statusUpdatedByName'] ?? json['updatedByName'] ?? '')
                 .toString(),
+        recordedInvoiceNo: (json['recordedInvoiceNo'] as num?)?.toInt(),
+        recordedInvoiceAt:
+            (json['recordedInvoiceAt'] ?? '').toString().trim().isEmpty
+                ? null
+                : (json['recordedInvoiceAt'] ?? '').toString(),
       );
 
   static String _orderDateFromJson(Map<String, dynamic> json) {
@@ -750,6 +825,7 @@ class ServerSyncConfig {
   final String baseUrl;
   final String? lastSyncAt;
   final String? lastStatus;
+  final bool locationSharingEnabled;
 
   const ServerSyncConfig({
     this.host = '0.0.0.0',
@@ -758,6 +834,7 @@ class ServerSyncConfig {
     this.baseUrl = '',
     this.lastSyncAt,
     this.lastStatus,
+    this.locationSharingEnabled = false,
   });
 
   ServerSyncConfig copyWith({
@@ -767,6 +844,7 @@ class ServerSyncConfig {
     String? baseUrl,
     String? lastSyncAt,
     String? lastStatus,
+    bool? locationSharingEnabled,
     bool clearLastSyncAt = false,
     bool clearLastStatus = false,
   }) {
@@ -777,6 +855,8 @@ class ServerSyncConfig {
       baseUrl: baseUrl ?? this.baseUrl,
       lastSyncAt: clearLastSyncAt ? null : (lastSyncAt ?? this.lastSyncAt),
       lastStatus: clearLastStatus ? null : (lastStatus ?? this.lastStatus),
+      locationSharingEnabled:
+          locationSharingEnabled ?? this.locationSharingEnabled,
     );
   }
 
@@ -787,6 +867,7 @@ class ServerSyncConfig {
         'baseUrl': baseUrl,
         'lastSyncAt': lastSyncAt,
         'lastStatus': lastStatus,
+        'locationSharingEnabled': locationSharingEnabled,
       };
 
   static ServerSyncConfig fromJson(Map<String, dynamic> json) =>
@@ -801,6 +882,9 @@ class ServerSyncConfig {
         lastStatus: (json['lastStatus'] ?? '').toString().trim().isEmpty
             ? null
             : (json['lastStatus'] ?? '').toString(),
+        locationSharingEnabled: json['locationSharingEnabled'] is bool
+            ? json['locationSharingEnabled'] as bool
+            : false,
       );
 }
 
