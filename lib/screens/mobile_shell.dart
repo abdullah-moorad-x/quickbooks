@@ -19,6 +19,7 @@ import 'payments_screen.dart';
 import '../services/mobile_sync_store.dart';
 import '../services/invoice_draft_suggestions.dart';
 import '../services/notification_service.dart';
+import '../services/godown_stock_store.dart';
 import '../services/paths.dart';
 import '../services/pdf_builder.dart';
 import '../services/server_sync_client.dart';
@@ -580,25 +581,28 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           await MobileAccessStore.loadServerConfig();
           break;
         case 1:
-          await Store.loadAll();
-          break;
-        case 2:
-          await PaymentStore.loadAll();
-          break;
-        case 3:
-          await CustomerStore.loadAll();
-          break;
-        case 4:
           await MobileAccessStore.loadOrders();
           break;
-        case 5:
+        case 2:
           await MobileAccessStore.loadSurjaniTrucks();
           break;
-        case 6:
+        case 3:
+          await MobileAccessStore.loadFactoryTrucks();
+          break;
+        case 4:
           await MobileAccessStore.loadOutgoingPayments();
           break;
-        case 7:
+        case 5:
           await MobileAccessStore.loadSyncLogs();
+          break;
+        case 6:
+          await CustomerStore.loadAll();
+          break;
+        case 7:
+          await Store.loadAll();
+          break;
+        case 8:
+          await PaymentStore.loadAll();
           break;
         default:
           return;
@@ -3241,6 +3245,18 @@ class _TruckBalanceBrandRow {
   }
 }
 
+class _TruckGodownBalanceEntry {
+  final String category;
+  final String sku;
+  final double qty;
+
+  const _TruckGodownBalanceEntry({
+    required this.category,
+    required this.sku,
+    required this.qty,
+  });
+}
+
 class _MobileOrdersTabState extends State<MobileOrdersTab> {
   bool _loading = true;
   bool _syncing = false;
@@ -3258,6 +3274,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
   bool _initialFactoryTruckSyncDone = false;
   int _activeOrderDrags = 0;
   List<MobileOrder> _orders = const [];
+  List<GodownStockInEntry> _godownStockIns = const [];
 
   bool _compactOrders(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
@@ -3331,9 +3348,14 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
   }
 
   Future<void> _load() async {
-    final orders = await MobileAccessStore.loadOrders();
-    final allTrucks = await MobileAccessStore.loadSurjaniTrucks();
-    final allFactoryTrucks = await MobileAccessStore.loadFactoryTrucks();
+    final results = await Future.wait<dynamic>([
+      MobileAccessStore.loadOrders(),
+      MobileAccessStore.loadSurjaniTrucks(),
+      MobileAccessStore.loadFactoryTrucks(),
+    ]);
+    final orders = results[0] as List<MobileOrder>;
+    final allTrucks = results[1] as List<MobileTruck>;
+    final allFactoryTrucks = results[2] as List<MobileTruck>;
     final trucks = _trucksForSelectedDate(allTrucks);
     final factoryTrucks = _trucksForSelectedDate(allFactoryTrucks);
     if (!mounted) return;
@@ -3343,6 +3365,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
       _replaceFactoryTrucksIfChanged(factoryTrucks);
       _loading = false;
     });
+    unawaited(_loadGodownStockIns());
     if (!_initialTruckSyncDone && allTrucks.isNotEmpty) {
       _initialTruckSyncDone = true;
       unawaited(_pushSurjaniTrucks(allTrucks, showErrors: false));
@@ -3351,6 +3374,12 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
       _initialFactoryTruckSyncDone = true;
       unawaited(_pushFactoryTrucks(allFactoryTrucks, showErrors: false));
     }
+  }
+
+  Future<void> _loadGodownStockIns() async {
+    final godownConfig = await GodownStockStore.loadConfig();
+    if (!mounted) return;
+    setState(() => _godownStockIns = godownConfig.stockIns);
   }
 
   void _replaceSurjaniTrucksIfChanged(List<MobileTruck> trucks) {
@@ -3439,6 +3468,48 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     return balances;
   }
 
+  String _stockTruckKey(String truckId) {
+    return truckId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-').toLowerCase();
+  }
+
+  bool _isSelectedOrderDay(String value) {
+    try {
+      final entryDate = parseInvoiceDate(value);
+      final selectedDate = parseInvoiceDate(_selectedOrderDate);
+      return entryDate.year == selectedDate.year &&
+          entryDate.month == selectedDate.month &&
+          entryDate.day == selectedDate.day;
+    } catch (_) {
+      return value == _selectedOrderDate;
+    }
+  }
+
+  List<_TruckGodownBalanceEntry> _godownBalanceEntriesForTruck(
+    _SurjaniTruckColumn truck,
+  ) {
+    final truckKey = _stockTruckKey(truck.id);
+    final byLine = <String, _TruckGodownBalanceEntry>{};
+    for (final entry in _godownStockIns) {
+      if (!_isSelectedOrderDay(entry.date)) continue;
+      final id = entry.id.toLowerCase();
+      if (!id.startsWith('gbal-') || !id.contains('-$truckKey-')) continue;
+      final key = '${entry.category.trim()}|${entry.sku.trim()}';
+      final current = byLine[key];
+      byLine[key] = _TruckGodownBalanceEntry(
+        category: entry.category.trim(),
+        sku: entry.sku.trim(),
+        qty: (current?.qty ?? 0) + entry.qty,
+      );
+    }
+    final values = byLine.values.where((entry) => entry.qty > 0).toList();
+    values.sort((a, b) {
+      final c = a.category.toLowerCase().compareTo(b.category.toLowerCase());
+      if (c != 0) return c;
+      return a.sku.toLowerCase().compareTo(b.sku.toLowerCase());
+    });
+    return values;
+  }
+
   Future<void> _moveTruckBalanceToGodown({
     required String sourceSite,
     required _SurjaniTruckColumn truck,
@@ -3465,7 +3536,9 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
         typeBags: balanceByType,
         stockLines: stockLines.map((line) => line.toJson()).toList(),
       );
+      final godownConfig = await GodownStockStore.loadConfig();
       if (!mounted) return;
+      setState(() => _godownStockIns = godownConfig.stockIns);
       showOk(context, 'Moved balance to Godown.');
     } on ServerSyncException catch (e) {
       if (!mounted) return;
@@ -3489,9 +3562,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
       builder: (dialogContext) => StatefulBuilder(
         builder: (dialogContext, setDialogState) {
           int totalFor(String category) {
-            return rows
-                .where((row) => row.category == category)
-                .fold<int>(
+            return rows.where((row) => row.category == category).fold<int>(
                   0,
                   (sum, row) =>
                       sum + (int.tryParse(row.qtyCtrl.text.trim()) ?? 0),
@@ -3634,8 +3705,8 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                       final brand = row.brandCtrl.text.trim();
                       final qty = int.tryParse(row.qtyCtrl.text.trim()) ?? 0;
                       if (brand.isEmpty || qty <= 0) {
-                        setDialogState(() => error =
-                            'Enter brand and qty for ${entry.key}.');
+                        setDialogState(() =>
+                            error = 'Enter brand and qty for ${entry.key}.');
                         return;
                       }
                       total += qty;
@@ -3786,15 +3857,18 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
   }
 
   Future<void> _refreshSurjaniTrucksFromStore() async {
-    final trucks =
-        await MobileAccessStore.loadSurjaniTrucksForDate(_selectedOrderDate);
-    final factoryTrucks =
-        await MobileAccessStore.loadFactoryTrucksForDate(_selectedOrderDate);
+    final results = await Future.wait<dynamic>([
+      MobileAccessStore.loadSurjaniTrucksForDate(_selectedOrderDate),
+      MobileAccessStore.loadFactoryTrucksForDate(_selectedOrderDate),
+    ]);
+    final trucks = results[0] as List<MobileTruck>;
+    final factoryTrucks = results[1] as List<MobileTruck>;
     if (!mounted) return;
     setState(() {
       _replaceSurjaniTrucksIfChanged(trucks);
       _replaceFactoryTrucksIfChanged(factoryTrucks);
     });
+    unawaited(_loadGodownStockIns());
   }
 
   Future<void> _syncOrders() async {
@@ -4486,6 +4560,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     final balance = truck.capacity - load;
     final typeBalance = truck.capacity - truck.allottedTypeBags;
     final balanceByType = _truckBalanceByType(truck, allocations);
+    final godownBalanceEntries = _godownBalanceEntriesForTruck(truck);
     return Padding(
       padding: EdgeInsets.only(bottom: compact ? 6 : 8),
       child: DragTarget<MobileOrder>(
@@ -4597,6 +4672,12 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                     ],
                   ),
                 ),
+              if (godownBalanceEntries.isNotEmpty) ...[
+                ...godownBalanceEntries.map(
+                  (entry) => _godownBalanceRow(entry, compact: compact),
+                ),
+                SizedBox(height: compact ? 4 : 6),
+              ],
               ...allocations
                   .map((order) => _orderRow(order, zeroCancelled: true)),
               if (allocations.isEmpty)
@@ -4631,6 +4712,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     final balance = truck.capacity - load;
     final typeBalance = truck.capacity - truck.allottedTypeBags;
     final balanceByType = _truckBalanceByType(truck, allocations);
+    final godownBalanceEntries = _godownBalanceEntriesForTruck(truck);
     return Padding(
       padding: EdgeInsets.only(bottom: compact ? 6 : 8),
       child: DragTarget<MobileOrder>(
@@ -4742,6 +4824,12 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                     ],
                   ),
                 ),
+              if (godownBalanceEntries.isNotEmpty) ...[
+                ...godownBalanceEntries.map(
+                  (entry) => _godownBalanceRow(entry, compact: compact),
+                ),
+                SizedBox(height: compact ? 4 : 6),
+              ],
               ...allocations
                   .map((order) => _orderRow(order, zeroCancelled: true)),
               if (allocations.isEmpty)
@@ -4755,6 +4843,63 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _godownBalanceRow(
+    _TruckGodownBalanceEntry entry, {
+    required bool compact,
+  }) {
+    const color = Color(0xFF17A673);
+    return Padding(
+      padding: EdgeInsets.only(bottom: compact ? 4 : 6),
+      child: Material(
+        color: const Color(0xFFEAF7F1),
+        borderRadius: BorderRadius.circular(8),
+        child: ListTile(
+          dense: true,
+          minVerticalPadding: compact ? 4 : null,
+          visualDensity: compact
+              ? const VisualDensity(horizontal: -2, vertical: -3)
+              : VisualDensity.compact,
+          contentPadding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10),
+          leading: Icon(
+            Icons.warehouse_outlined,
+            size: compact ? 18 : 20,
+            color: color,
+          ),
+          title: Text(
+            entry.sku.isEmpty ? 'Godown balance' : entry.sku,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: compact ? 13 : null,
+              fontWeight: FontWeight.w800,
+              color: const Color(0xFF173A2A),
+            ),
+          ),
+          subtitle: Text(
+            'Moved to Godown',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: compact ? 11 : 12),
+          ),
+          trailing: Text(
+            '${fmt0(entry.qty)} ${entry.category}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w800,
+              fontSize: compact ? 12 : null,
+            ),
+          ),
+          shape: RoundedRectangleBorder(
+            side: const BorderSide(color: Color(0xFF9ED9BD), width: 1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
       ),
     );
   }
@@ -5118,9 +5263,11 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
   final _brandCtrl = TextEditingController();
   final _brandFocus = FocusNode();
   final _noteCtrl = TextEditingController();
+  late final String _orderId;
   String _bagType = kItemTypes.first;
   String _site = _sites.first;
   bool _saving = false;
+  bool _suggestionsLoading = false;
   InvoiceDraftSuggestions _suggestions = const InvoiceDraftSuggestions.empty();
 
   bool get _isEditing => widget.order != null;
@@ -5129,6 +5276,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
   void initState() {
     super.initState();
     final order = widget.order;
+    _orderId = order?.id ?? MobileAccessStore.nextOrderId();
     if (order != null) {
       _dateCtrl.text = order.orderDate;
       _customerCtrl.text = order.customerName;
@@ -5143,7 +5291,9 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
     } else {
       _dateCtrl.text = DateTime.now().toIso8601String().split('T').first;
     }
-    _loadSuggestions();
+    if (!_isEditing) {
+      unawaited(_loadSuggestions());
+    }
   }
 
   @override
@@ -5161,7 +5311,14 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
   }
 
   Future<void> _loadSuggestions() async {
-    final suggestions = await InvoiceDraftSuggestions.load();
+    if (_suggestionsLoading || _suggestions.customers.isNotEmpty) return;
+    _suggestionsLoading = true;
+    final InvoiceDraftSuggestions suggestions;
+    try {
+      suggestions = await InvoiceDraftSuggestions.load();
+    } finally {
+      _suggestionsLoading = false;
+    }
     if (!mounted) return;
     setState(() => _suggestions = suggestions);
   }
@@ -5209,6 +5366,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
   }
 
   Future<void> _save() async {
+    if (_saving) return;
     final orderDate = _dateCtrl.text.trim();
     final customerName = _customerCtrl.text.trim();
     final plotNo = _plotCtrl.text.trim();
@@ -5233,7 +5391,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
         username: widget.user.username,
         passcode: widget.user.passcode,
         payload: {
-          'id': widget.order?.id ?? '',
+          'id': _orderId,
           'orderDate': orderDate,
           'customerName': customerName,
           'plotNo': plotNo,
@@ -5277,6 +5435,325 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
       }
       if (!mounted) return;
       showOk(context, 'Order marked ${mobileOrderStatusLabel(status)}.');
+      Navigator.of(context).pop(true);
+    } on ServerSyncException catch (e) {
+      if (!mounted) return;
+      showErr(context, e.message);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<_OrderInvoiceAmountInput?> _askInvoiceRate() async {
+    final rateCtrl = TextEditingController();
+    final cartageCtrl = TextEditingController();
+    try {
+      return await showDialog<_OrderInvoiceAmountInput>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Rate & Cartage'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: rateCtrl,
+                autofocus: true,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Rate'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: cartageCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration:
+                    const InputDecoration(labelText: 'Cartage (optional)'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final rate = double.tryParse(rateCtrl.text.trim()) ?? 0;
+                if (rate <= 0) return;
+                Navigator.of(dialogContext).pop(
+                  _OrderInvoiceAmountInput(
+                    rate: rate,
+                    cartage: double.tryParse(cartageCtrl.text.trim()) ?? 0,
+                  ),
+                );
+              },
+              child: const Text('Submit'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _disposeDialogTextControllers([rateCtrl, cartageCtrl]);
+    }
+  }
+
+  void _disposeDialogTextControllers(
+    List<TextEditingController> controllers,
+  ) {
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {
+      for (final controller in controllers) {
+        controller.dispose();
+      }
+    }));
+  }
+
+  Future<_OrderInvoiceCustomerInput?> _askInvoiceCustomerAndRate() async {
+    final nameCtrl = TextEditingController(
+      text: widget.order?.customerName.trim() ?? '',
+    );
+    final contactCtrl = TextEditingController();
+    final rateCtrl = TextEditingController();
+    final cartageCtrl = TextEditingController();
+    try {
+      return await showDialog<_OrderInvoiceCustomerInput>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Customer & Rate'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Customer Name'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: contactCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(labelText: 'Contact'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: rateCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Rate'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: cartageCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration:
+                    const InputDecoration(labelText: 'Cartage (optional)'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final name = nameCtrl.text.trim();
+                final rate = double.tryParse(rateCtrl.text.trim()) ?? 0;
+                if (name.isEmpty || rate <= 0) return;
+                Navigator.of(dialogContext).pop(
+                  _OrderInvoiceCustomerInput(
+                    name: name,
+                    contact: contactCtrl.text.trim(),
+                    rate: rate,
+                    cartage: double.tryParse(cartageCtrl.text.trim()) ?? 0,
+                  ),
+                );
+              },
+              child: const Text('Submit'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _disposeDialogTextControllers([
+        nameCtrl,
+        contactCtrl,
+        rateCtrl,
+        cartageCtrl,
+      ]);
+    }
+  }
+
+  Future<void> _recordDeliveredInvoice({double? rate, double? cartage}) async {
+    final order = widget.order;
+    if (order == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      final result = await ServerSyncClient.recordOrderInvoice(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        orderId: order.id,
+        rate: rate,
+        cartage: cartage,
+      );
+      final invoiceNo = result.order.recordedInvoiceNo;
+      if (invoiceNo == null) {
+        throw const ServerSyncException('Invoice number was not returned.');
+      }
+      if (!mounted) return;
+      showOk(context, 'Invoice #$invoiceNo recorded.');
+      Navigator.of(context).pop(true);
+    } on ServerSyncException catch (e) {
+      if (!mounted) return;
+      if (rate == null && e.message.toLowerCase().contains('rate')) {
+        setState(() => _saving = false);
+        final input = await _askInvoiceRate();
+        if (!mounted || input == null) return;
+        await _recordDeliveredInvoice(
+          rate: input.rate,
+          cartage: input.cartage,
+        );
+        return;
+      }
+      if (e.message.toLowerCase().contains('customer')) {
+        setState(() => _saving = false);
+        final input = await _askInvoiceCustomerAndRate();
+        if (!mounted || input == null) return;
+        await _recordDeliveredInvoiceWithCustomer(input);
+        return;
+      }
+      showErr(context, e.message);
+    } finally {
+      if (mounted && _saving) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _recordDeliveredInvoiceWithCustomer(
+    _OrderInvoiceCustomerInput input,
+  ) async {
+    final order = widget.order;
+    if (order == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      final result = await ServerSyncClient.recordOrderInvoice(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        orderId: order.id,
+        rate: input.rate,
+        cartage: input.cartage,
+        customerName: input.name,
+        customerContact: input.contact,
+      );
+      final invoiceNo = result.order.recordedInvoiceNo;
+      if (invoiceNo == null) {
+        throw const ServerSyncException('Invoice number was not returned.');
+      }
+      if (!mounted) return;
+      showOk(context, 'Invoice #$invoiceNo recorded.');
+      Navigator.of(context).pop(true);
+    } on ServerSyncException catch (e) {
+      if (!mounted) return;
+      showErr(context, e.message);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<_OrderInvoiceAmountInput?> _askRecordedInvoiceEdit() async {
+    final invoiceNo = widget.order?.recordedInvoiceNo;
+    if (invoiceNo == null) return null;
+    final invoices = await Store.loadAll();
+    final invoice = invoices.cast<Invoice?>().firstWhere(
+          (item) => item != null && item.sNo == invoiceNo,
+          orElse: () => null,
+        );
+    final rate = invoice == null || invoice.lines.isEmpty
+        ? ''
+        : invoice.lines.first.rate.toStringAsFixed(0);
+    final cartage = invoice == null || invoice.cartage <= 0
+        ? ''
+        : invoice.cartage.toStringAsFixed(0);
+    final rateCtrl = TextEditingController(text: rate);
+    final cartageCtrl = TextEditingController(text: cartage);
+    try {
+      if (!mounted) return null;
+      return await showDialog<_OrderInvoiceAmountInput>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text('Edit Invoice #$invoiceNo'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: rateCtrl,
+                autofocus: true,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(labelText: 'Rate'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: cartageCtrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                decoration:
+                    const InputDecoration(labelText: 'Cartage (optional)'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final nextRate = double.tryParse(rateCtrl.text.trim()) ?? 0;
+                if (nextRate <= 0) return;
+                Navigator.of(dialogContext).pop(
+                  _OrderInvoiceAmountInput(
+                    rate: nextRate,
+                    cartage: double.tryParse(cartageCtrl.text.trim()) ?? 0,
+                  ),
+                );
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      _disposeDialogTextControllers([rateCtrl, cartageCtrl]);
+    }
+  }
+
+  Future<void> _editRecordedInvoice() async {
+    final order = widget.order;
+    if (order == null || _saving) return;
+    final input = await _askRecordedInvoiceEdit();
+    if (!mounted || input == null) return;
+    setState(() => _saving = true);
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      final result = await ServerSyncClient.recordOrderInvoice(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        orderId: order.id,
+        rate: input.rate,
+        cartage: input.cartage,
+      );
+      final invoiceNo = result.order.recordedInvoiceNo;
+      if (invoiceNo == null) {
+        throw const ServerSyncException('Invoice number was not returned.');
+      }
+      if (!mounted) return;
+      showOk(context, 'Invoice #$invoiceNo updated.');
       Navigator.of(context).pop(true);
     } on ServerSyncException catch (e) {
       if (!mounted) return;
@@ -5401,6 +5878,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
               return TextField(
                 controller: controller,
                 focusNode: focusNode,
+                onTap: () => unawaited(_loadSuggestions()),
                 decoration:
                     const InputDecoration(labelText: 'Customer (optional)'),
               );
@@ -5441,6 +5919,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
               return TextField(
                 controller: controller,
                 focusNode: focusNode,
+                onTap: () => unawaited(_loadSuggestions()),
                 decoration: const InputDecoration(labelText: 'Plot No'),
               );
             },
@@ -5498,6 +5977,7 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
               return TextField(
                 controller: controller,
                 focusNode: focusNode,
+                onTap: () => unawaited(_loadSuggestions()),
                 decoration: const InputDecoration(labelText: 'Bags Brand'),
               );
             },
@@ -5629,6 +6109,19 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
                 icon: const Icon(Icons.picture_as_pdf_outlined),
                 label: const Text('Send Invoice'),
               ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _editRecordedInvoice,
+                icon: const Icon(Icons.edit_note_outlined),
+                label: const Text('Edit Entry'),
+              ),
+              const SizedBox(height: 12),
+            ] else if (widget.order!.status == MobileOrderStatus.delivered) ...[
+              FilledButton.icon(
+                onPressed: _saving ? null : _recordDeliveredInvoice,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: const Text('Record Invoice'),
+              ),
               const SizedBox(height: 12),
             ],
             OutlinedButton.icon(
@@ -5650,6 +6143,30 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
       ),
     );
   }
+}
+
+class _OrderInvoiceAmountInput {
+  final double rate;
+  final double cartage;
+
+  const _OrderInvoiceAmountInput({
+    required this.rate,
+    required this.cartage,
+  });
+}
+
+class _OrderInvoiceCustomerInput {
+  final String name;
+  final String contact;
+  final double rate;
+  final double cartage;
+
+  const _OrderInvoiceCustomerInput({
+    required this.name,
+    required this.contact,
+    required this.rate,
+    required this.cartage,
+  });
 }
 
 class MobileSyncSettingsTab extends StatefulWidget {

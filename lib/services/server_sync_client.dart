@@ -564,6 +564,61 @@ class ServerSyncClient {
     return ServerOrderSaveResult(order: saved);
   }
 
+  static Future<ServerOrderSaveResult> recordOrderInvoice({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required String orderId,
+    double? rate,
+    double? cartage,
+    String? customerName,
+    String? customerContact,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    final body = <String, dynamic>{'id': orderId};
+    if (rate != null) body['rate'] = rate;
+    if (cartage != null) body['cartage'] = cartage;
+    if ((customerName ?? '').trim().isNotEmpty) {
+      body['customerName'] = customerName!.trim();
+    }
+    if ((customerContact ?? '').trim().isNotEmpty) {
+      body['customerContact'] = customerContact!.trim();
+    }
+    final Map<String, dynamic> response;
+    try {
+      response = await _requestJson(
+        Uri.parse('$normalized/orders/record-invoice'),
+        method: 'POST',
+        headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+        body: body,
+      );
+    } on ServerSyncException catch (e) {
+      if (_isRouteNotFound(e)) {
+        throw const ServerSyncException(
+          'Order invoice recording is not available on this laptop server yet. Restart the laptop app after updating it.',
+        );
+      }
+      rethrow;
+    }
+    final orderJson = response['order'] is Map<String, dynamic>
+        ? response['order'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final order = MobileOrder.fromJson(orderJson);
+    if (order.id.trim().isEmpty) {
+      throw const ServerSyncException('Server did not return order.');
+    }
+    final saved = await MobileAccessStore.upsertOrder(
+      order,
+      preserveLocalFields: false,
+    );
+    return ServerOrderSaveResult(order: saved);
+  }
+
   static Future<void> deleteOrder({
     required String baseUrl,
     required String username,

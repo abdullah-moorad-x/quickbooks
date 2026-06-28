@@ -18,6 +18,7 @@ import 'sync_change_log_store.dart';
 class LocalApiServer {
   static HttpServer? _server;
   static final Map<String, String> _sessions = <String, String>{};
+  static bool _syncingOrderInvoice = false;
 
   static bool get isRunning => _server != null;
 
@@ -660,8 +661,9 @@ class LocalApiServer {
             {'error': 'Balance bags are required.'},
           );
         }
+        late final DateTime parsedStockDate;
         try {
-          parseInvoiceDate(date);
+          parsedStockDate = parseInvoiceDate(date);
         } catch (_) {
           return _writeJson(
             request,
@@ -669,6 +671,7 @@ class LocalApiServer {
             {'error': 'Invalid stock date.'},
           );
         }
+        final stockDate = formatInvoiceDate(parsedStockDate);
         final cleanBalances = <String, int>{};
         rawTypeBags.forEach((key, value) {
           final category = key.toString().trim();
@@ -701,7 +704,7 @@ class LocalApiServer {
             stockLines.add(
               GodownStockInEntry(
                 id: '',
-                date: date,
+                date: stockDate,
                 truckNo: truckNo,
                 category: category,
                 sku: sku,
@@ -716,7 +719,7 @@ class LocalApiServer {
             stockLines.add(
               GodownStockInEntry(
                 id: '',
-                date: date,
+                date: stockDate,
                 truckNo: truckNo,
                 category: entry.key,
                 sku: 'Truck Balance',
@@ -729,7 +732,9 @@ class LocalApiServer {
         final siteKey = sourceSite.toLowerCase().replaceAll(' ', '-');
         final truckKey =
             sourceTruckId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
-        final dateKey = date.replaceAll(RegExp(r'[^0-9]'), '');
+        final dateKey = '${parsedStockDate.year.toString().padLeft(4, '0')}'
+            '${parsedStockDate.month.toString().padLeft(2, '0')}'
+            '${parsedStockDate.day.toString().padLeft(2, '0')}';
         for (final line in stockLines) {
           final categoryKey = line.category.replaceAll(' ', '-');
           final skuKey = line.sku.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '-');
@@ -842,6 +847,133 @@ class LocalApiServer {
           'order': order.toJson(),
         });
       }
+      if (request.method == 'POST' && path == '/orders/record-invoice') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        final body = await utf8.decodeStream(request);
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid JSON body.'},
+          );
+        }
+        final id = (decoded['id'] ?? '').toString().trim();
+        if (id.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Order ID is required.'},
+          );
+        }
+        final order = (await MobileAccessStore.loadOrders())
+            .cast<MobileOrder?>()
+            .firstWhere(
+              (item) => item != null && item.id == id,
+              orElse: () => null,
+            );
+        if (order == null) {
+          return _writeJson(
+            request,
+            HttpStatus.notFound,
+            {'error': 'Order not found.'},
+          );
+        }
+        if (order.status != MobileOrderStatus.delivered) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Mark this order delivered before recording invoice.'},
+          );
+        }
+        final manualRate = decoded.containsKey('rate')
+            ? ((decoded['rate'] as num?)?.toDouble() ??
+                double.tryParse((decoded['rate'] ?? '').toString()) ??
+                0)
+            : null;
+        final manualCartage = decoded.containsKey('cartage')
+            ? ((decoded['cartage'] as num?)?.toDouble() ??
+                double.tryParse((decoded['cartage'] ?? '').toString()) ??
+                0)
+            : null;
+        final requestedCustomerName =
+            (decoded['customerName'] ?? '').toString().trim();
+        final requestedCustomerContact =
+            (decoded['customerContact'] ?? '').toString().trim();
+        if (manualRate != null && manualRate <= 0) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Valid rate is required.'},
+          );
+        }
+        if (manualCartage != null && manualCartage < 0) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Cartage cannot be negative.'},
+          );
+        }
+        var workingOrder = order;
+        var customer = await _customerForDeliveredOrder(order.customerName);
+        if (customer == null && requestedCustomerName.isNotEmpty) {
+          final customerId = await CustomerStore.nextCustomerId();
+          await CustomerStore.addCustomer(
+            customerId,
+            requestedCustomerName,
+            requestedCustomerContact,
+          );
+          customer = await CustomerStore.findById(customerId);
+          workingOrder = order.copyWith(customerName: requestedCustomerName);
+        }
+        if (order.recordedInvoiceNo == null) {
+          if (customer == null) {
+            return _writeJson(
+              request,
+              HttpStatus.badRequest,
+              {'error': 'Customer not found for this order.'},
+            );
+          }
+          final latestRate = manualRate != null && manualRate > 0
+              ? manualRate
+              : await _latestRateForOrder(customer, workingOrder);
+          if (latestRate <= 0 && manualRate == null) {
+            return _writeJson(
+              request,
+              HttpStatus.conflict,
+              {
+                'error': 'Rate is required for this SKU.',
+                'rateRequired': true,
+              },
+            );
+          }
+        }
+        final synced = await _syncDeliveredOrderInvoice(
+          workingOrder,
+          createIfMissing: true,
+          overrideRate: manualRate,
+          overrideCartage: manualCartage,
+        );
+        await MobileAccessStore.upsertOrder(synced);
+        if (synced.recordedInvoiceNo == null) {
+          return _writeJson(
+            request,
+            HttpStatus.conflict,
+            {'error': 'Invoice could not be recorded for this order.'},
+          );
+        }
+        return _writeJson(request, HttpStatus.ok, {
+          'ok': true,
+          'order': synced.toJson(),
+        });
+      }
       if (request.method == 'DELETE' &&
           request.uri.pathSegments.length == 2 &&
           request.uri.pathSegments.first == 'orders') {
@@ -908,11 +1040,10 @@ class LocalApiServer {
           );
         }
         final id = (decoded['id'] ?? '').toString().trim();
+        final existingOrders = await MobileAccessStore.loadOrders();
         final existing = id.isEmpty
             ? null
-            : (await MobileAccessStore.loadOrders())
-                .cast<MobileOrder?>()
-                .firstWhere(
+            : existingOrders.cast<MobileOrder?>().firstWhere(
                   (order) => order != null && order.id == id,
                   orElse: () => null,
                 );
@@ -961,6 +1092,39 @@ class LocalApiServer {
           );
         }
         final now = DateTime.now().toIso8601String();
+        if (id.isEmpty && existing == null) {
+          final duplicate = existingOrders.cast<MobileOrder?>().firstWhere(
+            (order) {
+              if (order == null) return false;
+              if (order.createdByUserId != user.id) return false;
+              if (order.orderDate != orderDate ||
+                  order.customerName.trim().toLowerCase() !=
+                      customerName.toLowerCase() ||
+                  order.plotNo.trim().toLowerCase() != plotNo.toLowerCase() ||
+                  order.bagsQuantity != bagsQuantity ||
+                  order.bagsType.trim().toLowerCase() !=
+                      bagsType.toLowerCase() ||
+                  order.bagsBrand.trim().toLowerCase() !=
+                      bagsBrand.toLowerCase() ||
+                  order.orderSite.trim().toLowerCase() !=
+                      orderSite.toLowerCase() ||
+                  order.note.trim().toLowerCase() != note.toLowerCase()) {
+                return false;
+              }
+              final createdAt = DateTime.tryParse(order.createdAt);
+              if (createdAt == null) return false;
+              return DateTime.now().difference(createdAt).inMinutes.abs() < 10;
+            },
+            orElse: () => null,
+          );
+          if (duplicate != null) {
+            return _writeJson(request, HttpStatus.ok, {
+              'ok': true,
+              'duplicate': true,
+              'order': duplicate.toJson(),
+            });
+          }
+        }
         final isNewOrder = existing == null;
         var order = (existing ??
                 MobileOrder(
@@ -1258,92 +1422,119 @@ class LocalApiServer {
     }
   }
 
-  static Future<MobileOrder> _syncDeliveredOrderInvoice(MobileOrder order,
-      {required bool createIfMissing}) async {
-    final recordedInvoiceNo = order.recordedInvoiceNo;
-    if (recordedInvoiceNo != null) {
-      if (order.status != MobileOrderStatus.delivered) {
-        await _deleteRecordedOrderInvoice(order);
-        return order.copyWith(clearRecordedInvoice: true);
-      }
-      await _updateRecordedOrderInvoice(order, recordedInvoiceNo);
-      return order;
+  static Future<T> _withOrderInvoiceLock<T>(Future<T> Function() action) async {
+    while (_syncingOrderInvoice) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
     }
-    if (!createIfMissing || order.status != MobileOrderStatus.delivered) {
-      return order;
-    }
-    final customerName = order.customerName.trim();
-    if (customerName.isEmpty) return order;
-
-    final customer = await _customerForDeliveredOrder(customerName);
-    if (customer == null) return order;
-
-    final DateTime parsedOrderDate;
+    _syncingOrderInvoice = true;
     try {
-      parsedOrderDate = parseInvoiceDate(order.orderDate);
-    } catch (_) {
-      return order;
+      return await action();
+    } finally {
+      _syncingOrderInvoice = false;
     }
+  }
 
-    final rate = await _latestRateForOrder(customer, order);
-    if (rate <= 0) return order;
+  static Future<MobileOrder> _syncDeliveredOrderInvoice(
+    MobileOrder order, {
+    required bool createIfMissing,
+    double? overrideRate,
+    double? overrideCartage,
+  }) {
+    return _withOrderInvoiceLock(() async {
+      final recordedInvoiceNo = order.recordedInvoiceNo;
+      if (recordedInvoiceNo != null) {
+        if (order.status != MobileOrderStatus.delivered) {
+          await _deleteRecordedOrderInvoice(order);
+          return order.copyWith(clearRecordedInvoice: true);
+        }
+        await _updateRecordedOrderInvoice(
+          order,
+          recordedInvoiceNo,
+          overrideRate: overrideRate,
+          overrideCartage: overrideCartage,
+        );
+        return order;
+      }
+      if (!createIfMissing || order.status != MobileOrderStatus.delivered) {
+        return order;
+      }
+      final customerName = order.customerName.trim();
+      if (customerName.isEmpty) return order;
 
-    final now = DateTime.now().toIso8601String();
-    final invoiceDate = formatInvoiceDate(parsedOrderDate);
-    final nextNo = await Store.nextSerial();
-    final invoice = Invoice(
-      sNo: nextNo,
-      date: invoiceDate,
-      customer: customer.name,
-      customerDisplay: customer.displayName.trim().isEmpty
-          ? customer.name
-          : customer.displayName,
-      customerId: customer.id,
-      contact: customer.contact,
-      address: order.plotNo,
-      site: order.orderSite,
-      lines: [
-        ItemLine(
-          order.bagsType,
-          brand: order.bagsBrand,
-          qty: order.bagsQuantity,
-          rate: rate,
+      final customer = await _customerForDeliveredOrder(customerName);
+      if (customer == null) return order;
+
+      final DateTime parsedOrderDate;
+      try {
+        parsedOrderDate = parseInvoiceDate(order.orderDate);
+      } catch (_) {
+        return order;
+      }
+
+      final rate = overrideRate != null && overrideRate > 0
+          ? overrideRate
+          : await _latestRateForOrder(customer, order);
+      if (rate <= 0) return order;
+
+      final now = DateTime.now().toIso8601String();
+      final invoiceDate = formatInvoiceDate(parsedOrderDate);
+      final nextNo = await Store.nextSerial();
+      final invoice = Invoice(
+        sNo: nextNo,
+        date: invoiceDate,
+        customer: customer.name,
+        customerDisplay: customer.displayName.trim().isEmpty
+            ? customer.name
+            : customer.displayName,
+        customerId: customer.id,
+        contact: customer.contact,
+        address: order.plotNo,
+        site: order.orderSite,
+        lines: [
+          ItemLine(
+            order.bagsType,
+            brand: order.bagsBrand,
+            qty: order.bagsQuantity,
+            rate: rate,
+          ),
+        ],
+        cartage: overrideCartage ?? 0,
+        paid: 0,
+        walkIn: false,
+      );
+      await Store.upsertInvoice(invoice);
+      queueInvoiceReportRefresh(
+        dates: {parsedOrderDate},
+        months: {parsedOrderDate},
+        customerKeys: {invoice.customerId, invoice.customer},
+      );
+
+      final recorded = order.copyWith(
+        recordedInvoiceNo: nextNo,
+        recordedInvoiceAt: now,
+      );
+      await MobileAccessStore.addSyncLog(
+        SyncLogEntry(
+          id: MobileAccessStore.nextSyncLogId(),
+          createdAt: now,
+          direction: SyncLogDirection.local,
+          status: SyncLogStatus.success,
+          entityType: 'invoice',
+          entityId: '$nextNo',
+          summary: 'Auto-recorded delivered order as invoice #$nextNo',
+          details: 'Order ${order.id} - ${customer.name}',
         ),
-      ],
-      cartage: 0,
-      paid: 0,
-      walkIn: false,
-    );
-    await Store.upsertInvoice(invoice);
-    queueInvoiceReportRefresh(
-      dates: {parsedOrderDate},
-      months: {parsedOrderDate},
-      customerKeys: {invoice.customerId, invoice.customer},
-    );
-
-    final recorded = order.copyWith(
-      recordedInvoiceNo: nextNo,
-      recordedInvoiceAt: now,
-    );
-    await MobileAccessStore.addSyncLog(
-      SyncLogEntry(
-        id: MobileAccessStore.nextSyncLogId(),
-        createdAt: now,
-        direction: SyncLogDirection.local,
-        status: SyncLogStatus.success,
-        entityType: 'invoice',
-        entityId: '$nextNo',
-        summary: 'Auto-recorded delivered order as invoice #$nextNo',
-        details: 'Order ${order.id} - ${customer.name}',
-      ),
-    );
-    return recorded;
+      );
+      return recorded;
+    });
   }
 
   static Future<void> _updateRecordedOrderInvoice(
     MobileOrder order,
-    int invoiceNo,
-  ) async {
+    int invoiceNo, {
+    double? overrideRate,
+    double? overrideCartage,
+  }) async {
     final invoices = await Store.loadAll();
     final index = invoices.indexWhere((invoice) => invoice.sNo == invoiceNo);
     if (index < 0) return;
@@ -1377,10 +1568,12 @@ class LocalApiServer {
           order.bagsType,
           brand: order.bagsBrand,
           qty: order.bagsQuantity,
-          rate: latestRate > 0 ? latestRate : existingRate,
+          rate: overrideRate != null && overrideRate > 0
+              ? overrideRate
+              : (latestRate > 0 ? latestRate : existingRate),
         ),
       ],
-      cartage: existing.cartage,
+      cartage: overrideCartage ?? existing.cartage,
       paid: existing.paid,
       walkIn: existing.walkIn,
       walkInPaymentType: existing.walkInPaymentType,
