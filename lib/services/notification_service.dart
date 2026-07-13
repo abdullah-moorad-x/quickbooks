@@ -1,17 +1,28 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 import '../models/mobile_access.dart';
 
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+}
+
 class NotificationService {
+  static const pushChannelId = 'quickbill_push_loud_v1';
   static const _loudOrderSound =
       RawResourceAndroidNotificationSound('quickbill_loud_order');
 
   static final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
   static bool _initialized = false;
+  static bool _pushInitialized = false;
+  static StreamSubscription<RemoteMessage>? _foregroundSubscription;
 
   static Future<void> initialize() async {
     if (_initialized || kIsWeb) return;
@@ -45,15 +56,108 @@ class NotificationService {
     try {
       await _notifications.initialize(settings: settings);
       if (Platform.isAndroid) {
-        await _notifications
-            .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>()
-            ?.requestNotificationsPermission();
+        final androidPlugin =
+            _notifications.resolvePlatformSpecificImplementation<
+                AndroidFlutterLocalNotificationsPlugin>();
+        await androidPlugin?.createNotificationChannel(
+          const AndroidNotificationChannel(
+            pushChannelId,
+            'QuickBill push alerts',
+            description: 'Order and status notifications from QuickBill',
+            importance: Importance.max,
+            playSound: true,
+            sound: _loudOrderSound,
+            enableVibration: true,
+          ),
+        );
+        await androidPlugin?.requestNotificationsPermission();
       }
       _initialized = true;
     } catch (_) {
       _initialized = false;
     }
+  }
+
+  static Future<void> initializePushMessaging() async {
+    if (_pushInitialized || kIsWeb) return;
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+    try {
+      await Firebase.initializeApp();
+      FirebaseMessaging.onBackgroundMessage(
+        firebaseMessagingBackgroundHandler,
+      );
+      await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      await FirebaseMessaging.instance
+          .setForegroundNotificationPresentationOptions(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      await _foregroundSubscription?.cancel();
+      _foregroundSubscription = FirebaseMessaging.onMessage.listen(
+        showRemoteMessage,
+      );
+      _pushInitialized = true;
+    } catch (_) {
+      _pushInitialized = false;
+    }
+  }
+
+  static Future<String?> pushToken() async {
+    await initializePushMessaging();
+    if (!_pushInitialized) return null;
+    try {
+      return await FirebaseMessaging.instance.getToken();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Stream<String> get tokenRefreshes =>
+      FirebaseMessaging.instance.onTokenRefresh;
+
+  static Future<void> showRemoteMessage(RemoteMessage message) async {
+    await initialize();
+    if (!_initialized) return;
+    final title = message.notification?.title ??
+        message.data['title']?.toString() ??
+        'QuickBill notification';
+    final body = message.notification?.body ??
+        message.data['body']?.toString() ??
+        'QuickBill has a new update.';
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        pushChannelId,
+        'QuickBill push alerts',
+        channelDescription: 'Order and status notifications from QuickBill',
+        importance: Importance.max,
+        priority: Priority.max,
+        playSound: true,
+        sound: _loudOrderSound,
+        audioAttributesUsage: AudioAttributesUsage.alarm,
+        enableVibration: true,
+        category: AndroidNotificationCategory.message,
+      ),
+      iOS: DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      ),
+    );
+    try {
+      await _notifications.show(
+        id: message.messageId?.hashCode ??
+            DateTime.now().millisecondsSinceEpoch.remainder(100000),
+        title: title,
+        body: body,
+        notificationDetails: details,
+        payload: message.data['orderId']?.toString(),
+      );
+    } catch (_) {}
   }
 
   static Future<void> showNewOrder(MobileOrder order) async {

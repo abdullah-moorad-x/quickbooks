@@ -79,6 +79,10 @@ List<Invoice> _cloneInvoices(List<Invoice> invoices) {
             cartage: inv.cartage,
             paid: inv.paid,
             walkIn: inv.walkIn,
+            isReturn: inv.isReturn,
+            returnOfInvoiceNo: inv.returnOfInvoiceNo,
+            sourceOrderId: inv.sourceOrderId,
+            sourceReturnId: inv.sourceReturnId,
             walkInPaymentType: inv.walkInPaymentType,
             walkInPaymentNote: inv.walkInPaymentNote,
             walkInBank: inv.walkInBank,
@@ -187,6 +191,10 @@ class Store {
       cartage: inv.cartage,
       paid: inv.paid,
       walkIn: inv.walkIn,
+      isReturn: inv.isReturn,
+      returnOfInvoiceNo: inv.returnOfInvoiceNo,
+      sourceOrderId: inv.sourceOrderId,
+      sourceReturnId: inv.sourceReturnId,
       walkInPaymentType: inv.walkInPaymentType,
       walkInPaymentNote: inv.walkInPaymentNote,
       walkInBank: inv.walkInBank,
@@ -223,7 +231,8 @@ class Store {
     final all = await loadAll();
     final idx = all.indexWhere((e) => e.sNo == sNo);
     if (idx >= 0) {
-      all[idx].paid = paid.clamp(0, all[idx].balance);
+      all[idx].paid =
+          all[idx].balance <= 0 ? 0 : paid.clamp(0, all[idx].balance);
       await saveAll(all);
     }
   }
@@ -788,6 +797,7 @@ Future<void> syncInvoicesPaidFromPayments() async {
   // Walk-in invoices are always treated as fully paid on the spot and do not participate in khata allocations.
   for (final inv in invoices) {
     if (!inv.walkIn) continue;
+    if (inv.balance <= 0) continue;
     final paidNow = inv.balance;
     if ((inv.paid - paidNow).abs() > 0.0001) {
       inv.paid = paidNow;
@@ -811,6 +821,7 @@ Future<void> syncInvoicesPaidFromPayments() async {
   final invoicesByCustomer = <String, List<Invoice>>{};
   for (final inv in invoices) {
     if (inv.walkIn) continue;
+    if (inv.balance <= 0) continue;
     final k = keyOf(inv.customerId, inv.customer);
     (invoicesByCustomer[k] ??= []).add(inv);
   }

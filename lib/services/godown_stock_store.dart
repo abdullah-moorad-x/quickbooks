@@ -46,9 +46,16 @@ class GodownSku {
     final rawCategory = (json['category'] ?? '').toString().trim();
     final category = kItemTypes.contains(rawCategory) ? rawCategory : '';
     final aliasesRaw = (json['aliases'] as List?) ?? const [];
-    final aliases = aliasesRaw.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).toList();
+    final aliases = aliasesRaw
+        .map((e) => e.toString().trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
     final openingBags = (json['openingBags'] as num?)?.toDouble() ?? 0.0;
-    return GodownSku(name: name, category: category, aliases: aliases, openingBags: openingBags);
+    return GodownSku(
+        name: name,
+        category: category,
+        aliases: aliases,
+        openingBags: openingBags);
   }
 }
 
@@ -78,19 +85,28 @@ class GodownConfig {
       };
 
   static GodownConfig fromJson(Map<String, dynamic> json) {
-    final hasLegacyOpening = json.containsKey('openingBags') || json.containsKey('openingDate');
+    final hasLegacyOpening =
+        json.containsKey('openingBags') || json.containsKey('openingDate');
     if (hasLegacyOpening && !json.containsKey('skus')) {
       final legacyDate = (json['openingDate'] ?? '').toString().trim();
-      final safeDate = legacyDate.isEmpty ? formatInvoiceDate(DateTime.now()) : legacyDate;
+      final safeDate =
+          legacyDate.isEmpty ? formatInvoiceDate(DateTime.now()) : legacyDate;
       final legacyBags = (json['openingBags'] as num?)?.toDouble() ?? 0.0;
       final sku = legacyBags.abs() > 0.0001
-          ? [GodownSku(name: 'GENERAL', category: '', aliases: const ['ALL'], openingBags: legacyBags)]
+          ? [
+              GodownSku(
+                  name: 'GENERAL',
+                  category: '',
+                  aliases: const ['ALL'],
+                  openingBags: legacyBags)
+            ]
           : const <GodownSku>[];
       return GodownConfig(openingDate: safeDate, skus: sku, stockIns: const []);
     }
 
     final rawDate = (json['openingDate'] ?? '').toString().trim();
-    final safeDate = rawDate.isEmpty ? formatInvoiceDate(DateTime.now()) : rawDate;
+    final safeDate =
+        rawDate.isEmpty ? formatInvoiceDate(DateTime.now()) : rawDate;
     final rawSkus = (json['skus'] as List?) ?? const [];
     final skus = rawSkus
         .whereType<Map>()
@@ -154,7 +170,9 @@ class GodownStockInEntry {
       category: (json['category'] ?? '').toString(),
       sku: (json['sku'] ?? '').toString(),
       qty: (json['qty'] as num?)?.toDouble() ?? 0.0,
-      note: (json['note'] ?? '').toString().trim().isEmpty ? null : (json['note'] ?? '').toString(),
+      note: (json['note'] ?? '').toString().trim().isEmpty
+          ? null
+          : (json['note'] ?? '').toString(),
     );
   }
 }
@@ -228,14 +246,19 @@ class GodownStockReport {
     required this.unmapped,
   });
 
-  double get totalOpening => balances.fold<double>(0, (s, e) => s + e.openingBags);
-  double get totalStocked => balances.fold<double>(0, (s, e) => s + e.stockedTillDate);
-  double get totalSold => balances.fold<double>(0, (s, e) => s + e.soldTillDate);
-  double get totalRemaining => balances.fold<double>(0, (s, e) => s + e.remainingBags);
+  double get totalOpening =>
+      balances.fold<double>(0, (s, e) => s + e.openingBags);
+  double get totalStocked =>
+      balances.fold<double>(0, (s, e) => s + e.stockedTillDate);
+  double get totalSold =>
+      balances.fold<double>(0, (s, e) => s + e.soldTillDate);
+  double get totalRemaining =>
+      balances.fold<double>(0, (s, e) => s + e.remainingBags);
 }
 
 class GodownStockStore {
-  static String _skuKey(String name, String category) => '${_norm(name)}|${_norm(category)}';
+  static String _skuKey(String name, String category) =>
+      '${_norm(name)}|${_norm(category)}';
   static Future<File> _file() async {
     final base = await baseDir();
     return File('${base.path}${Platform.pathSeparator}godown_stock.json');
@@ -247,7 +270,8 @@ class GodownStockStore {
       if (!await f.exists()) return GodownConfig.defaults();
       final json = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       final cfg = GodownConfig.fromJson(json);
-      cfg.skus.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      cfg.skus
+          .sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       return cfg;
     } catch (_) {
       return GodownConfig.defaults();
@@ -262,7 +286,8 @@ class GodownStockStore {
 
   static Future<void> saveOpeningDate(String openingDate) async {
     final cfg = await loadConfig();
-    await saveConfig(GodownConfig(openingDate: openingDate, skus: cfg.skus, stockIns: cfg.stockIns));
+    await saveConfig(GodownConfig(
+        openingDate: openingDate, skus: cfg.skus, stockIns: cfg.stockIns));
   }
 
   static Future<void> upsertSku({
@@ -278,7 +303,11 @@ class GodownStockStore {
     final cfg = await loadConfig();
     final key = _skuKey(cleanName, cleanCategory);
 
-    final cleanedAliases = aliases.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet().toList();
+    final cleanedAliases = aliases
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList();
     final list = <GodownSku>[];
     var replaced = false;
     for (final sku in cfg.skus) {
@@ -295,22 +324,30 @@ class GodownStockStore {
       }
     }
     if (!replaced) {
-      list.add(GodownSku(name: cleanName, category: cleanCategory, aliases: cleanedAliases, openingBags: openingBags));
+      list.add(GodownSku(
+          name: cleanName,
+          category: cleanCategory,
+          aliases: cleanedAliases,
+          openingBags: openingBags));
     }
     list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-    await saveConfig(GodownConfig(openingDate: cfg.openingDate, skus: list, stockIns: cfg.stockIns));
+    await saveConfig(GodownConfig(
+        openingDate: cfg.openingDate, skus: list, stockIns: cfg.stockIns));
   }
 
   static Future<void> deleteSku(String name, String category) async {
     final cfg = await loadConfig();
     final key = _skuKey(name, category);
-    final list = cfg.skus.where((e) => _skuKey(e.name, e.category) != key).toList();
-    await saveConfig(GodownConfig(openingDate: cfg.openingDate, skus: list, stockIns: cfg.stockIns));
+    final list =
+        cfg.skus.where((e) => _skuKey(e.name, e.category) != key).toList();
+    await saveConfig(GodownConfig(
+        openingDate: cfg.openingDate, skus: list, stockIns: cfg.stockIns));
   }
 
   static Future<String> nextStockInId([DateTime? when]) async {
     final base = when ?? DateTime.now();
-    final ymd = '${base.year.toString().padLeft(4, '0')}${base.month.toString().padLeft(2, '0')}${base.day.toString().padLeft(2, '0')}';
+    final ymd =
+        '${base.year.toString().padLeft(4, '0')}${base.month.toString().padLeft(2, '0')}${base.day.toString().padLeft(2, '0')}';
     final cfg = await loadConfig();
     int maxNum = 0;
     for (final e in cfg.stockIns.where((x) => x.id.startsWith('GIN-$ymd-'))) {
@@ -334,12 +371,14 @@ class GodownStockStore {
     final cfg = await loadConfig();
     final skuDef = cfg.skus.firstWhere(
       (e) =>
-          _norm(e.name) == _norm(sku) &&
-          (_norm(e.category) == _norm(category)),
-      orElse: () => const GodownSku(name: '', category: '', aliases: [], openingBags: 0),
+          _norm(e.name) == _norm(sku) && (_norm(e.category) == _norm(category)),
+      orElse: () =>
+          const GodownSku(name: '', category: '', aliases: [], openingBags: 0),
     );
     if (skuDef.name.isEmpty) return;
-    if (skuDef.category.isNotEmpty && skuDef.category != category.trim()) return;
+    if (skuDef.category.isNotEmpty && skuDef.category != category.trim()) {
+      return;
+    }
     final id = await nextStockInId(parseInvoiceDate(date));
     final list = [...cfg.stockIns];
     list.add(
@@ -363,7 +402,8 @@ class GodownStockStore {
       if (d != 0) return d;
       return a.id.compareTo(b.id);
     });
-    await saveConfig(GodownConfig(openingDate: cfg.openingDate, skus: cfg.skus, stockIns: list));
+    await saveConfig(GodownConfig(
+        openingDate: cfg.openingDate, skus: cfg.skus, stockIns: list));
   }
 
   static Future<void> ensureSku({
@@ -432,15 +472,19 @@ class GodownStockStore {
   static Future<void> deleteStockIn(String id) async {
     final cfg = await loadConfig();
     final list = cfg.stockIns.where((e) => e.id != id).toList();
-    await saveConfig(GodownConfig(openingDate: cfg.openingDate, skus: cfg.skus, stockIns: list));
+    await saveConfig(GodownConfig(
+        openingDate: cfg.openingDate, skus: cfg.skus, stockIns: list));
   }
 
-  static Future<String?> resolveCanonicalSku(String input, {String? category}) async {
+  static Future<String?> resolveCanonicalSku(String input,
+      {String? category}) async {
     final cfg = await loadConfig();
     return resolveCanonicalSkuFromConfig(cfg, input, category: category);
   }
 
-  static String? resolveCanonicalSkuFromConfig(GodownConfig config, String input, {String? category}) {
+  static String? resolveCanonicalSkuFromConfig(
+      GodownConfig config, String input,
+      {String? category}) {
     final q = _norm(input);
     if (q.isEmpty) return null;
     bool categoryMatches(GodownSku sku) {
@@ -449,6 +493,7 @@ class GodownStockStore {
       if (sku.category.isEmpty) return true;
       return sku.category == c;
     }
+
     for (final sku in config.skus) {
       if (!categoryMatches(sku)) continue;
       if (_norm(sku.name) == q) return sku.name;
@@ -474,8 +519,12 @@ class GodownStockStore {
     final invoices = await Store.loadAll();
     final soldByDateSku = <DateTime, Map<String, double>>{};
     final stockInByDateSku = <DateTime, Map<String, double>>{};
-    final soldTotals = <String, double>{for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0};
-    final stockedTotals = <String, double>{for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0};
+    final soldTotals = <String, double>{
+      for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0
+    };
+    final stockedTotals = <String, double>{
+      for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0
+    };
     final unmapped = <GodownUnmappedLine>[];
     var maxDate = openingDate;
 
@@ -507,10 +556,11 @@ class GodownStockStore {
       if (d.isBefore(openingDate)) continue;
 
       for (final line in inv.lines) {
-        if (line.qty <= 0) continue;
+        if (line.qty == 0) continue;
         final brand = line.brand.trim();
         if (brand.isEmpty) continue;
-        final canonical = resolveCanonicalSkuFromConfig(cfg, brand, category: line.typeLabel);
+        final canonical =
+            resolveCanonicalSkuFromConfig(cfg, brand, category: line.typeLabel);
         if (canonical == null) {
           unmapped.add(
             GodownUnmappedLine(
@@ -534,10 +584,16 @@ class GodownStockStore {
     if (cap.isAfter(maxDate)) maxDate = cap;
     if (maxDate.isBefore(openingDate)) maxDate = openingDate;
 
-    final runningSold = <String, double>{for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0};
-    final runningStockIn = <String, double>{for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0};
+    final runningSold = <String, double>{
+      for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0
+    };
+    final runningStockIn = <String, double>{
+      for (final s in cfg.skus) _skuKey(s.name, s.category): 0.0
+    };
     final dailyRows = <GodownDailySkuRow>[];
-    for (DateTime d = openingDate; !d.isAfter(maxDate); d = d.add(const Duration(days: 1))) {
+    for (DateTime d = openingDate;
+        !d.isAfter(maxDate);
+        d = d.add(const Duration(days: 1))) {
       final soldDayMap = soldByDateSku[d] ?? const <String, double>{};
       final stockDayMap = stockInByDateSku[d] ?? const <String, double>{};
       for (final sku in cfg.skus) {
@@ -555,7 +611,9 @@ class GodownStockStore {
             stockedTillDate: runningStockIn[key] ?? 0,
             soldToday: soldToday,
             soldTillDate: runningSold[key] ?? 0,
-            remainingBags: sku.openingBags + (runningStockIn[key] ?? 0) - (runningSold[key] ?? 0),
+            remainingBags: sku.openingBags +
+                (runningStockIn[key] ?? 0) -
+                (runningSold[key] ?? 0),
           ),
         );
       }

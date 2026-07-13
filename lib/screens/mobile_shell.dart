@@ -16,7 +16,9 @@ import '../models/payment.dart';
 import 'godown_hisaab_screen.dart';
 import 'invoice_screen.dart';
 import 'payments_screen.dart';
+import 'stats_screen.dart';
 import '../services/mobile_sync_store.dart';
+import '../services/mobile_draft_retry_service.dart';
 import '../services/invoice_draft_suggestions.dart';
 import '../services/notification_service.dart';
 import '../services/godown_stock_store.dart';
@@ -327,23 +329,29 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   int _dataPreloadStep = 0;
   Timer? _orderAutoSyncTimer;
   Timer? _locationShareTimer;
+  StreamSubscription<String>? _pushTokenSubscription;
   bool _autoSyncingOrders = false;
   bool _sendingLocation = false;
+  bool _pushNotificationsActive = false;
   Set<String> _knownOrderIds = const <String>{};
   Map<String, String> _knownOrderStatusKeys = const <String, String>{};
 
   List<({WidgetBuilder builder, IconData icon, String label})> _navItems() {
     return [
       (
-        builder: (_) => MobileDashboardTab(user: widget.user),
-        icon: Icons.home_outlined,
-        label: 'Home',
+        builder: (_) => StatsScreen(
+              onRefresh: () async {
+                await _pullLaptopData(widget.user);
+              },
+            ),
+        icon: Icons.insights_outlined,
+        label: 'Stats',
       ),
       if (widget.user.role != UserRole.viewer)
         (
           builder: (_) => const InvoiceScreen(makeupInvoiceMode: true),
           icon: Icons.edit_document,
-          label: 'Draft',
+          label: 'Makeup',
         ),
       (
         builder: (_) => MobileInvoicesTab(user: widget.user),
@@ -516,6 +524,7 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
   }
 
   IconData _selectedIconFor(IconData icon) {
+    if (icon == Icons.insights_outlined) return Icons.insights;
     if (icon == Icons.home_outlined) return Icons.home;
     if (icon == Icons.receipt_long_outlined) return Icons.receipt_long;
     if (icon == Icons.assignment_outlined) return Icons.assignment;
@@ -532,12 +541,15 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       setState(() => _tabsReady = true);
+      MobileDraftRetryService.start(widget.user);
       _scheduleDataPreload();
       Future<void>.delayed(const Duration(milliseconds: 350), () {
         if (mounted) _startOrderAutoSync();
       });
       Future<void>.delayed(const Duration(milliseconds: 900), () {
-        if (mounted) _startLocationSharing();
+        if (!mounted) return;
+        _startLocationSharing();
+        _startPushNotifications();
       });
     });
   }
@@ -548,7 +560,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     if (oldWidget.user.id != widget.user.id ||
         oldWidget.user.passcode != widget.user.passcode) {
       _startOrderAutoSync();
+      MobileDraftRetryService.start(widget.user);
       _startLocationSharing();
+      _startPushNotifications();
       _tab = 0;
       _tabCache.clear();
       _drawerChildrenCache = null;
@@ -563,7 +577,39 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
     _dataPreloadTimer?.cancel();
     _orderAutoSyncTimer?.cancel();
     _locationShareTimer?.cancel();
+    _pushTokenSubscription?.cancel();
+    MobileDraftRetryService.stop();
     super.dispose();
+  }
+
+  void _startPushNotifications() {
+    _pushTokenSubscription?.cancel();
+    unawaited(_registerPushToken());
+    _pushTokenSubscription = NotificationService.tokenRefreshes.listen(
+      (token) => unawaited(_registerPushToken(token)),
+    );
+  }
+
+  Future<void> _registerPushToken([String? refreshedToken]) async {
+    try {
+      final token = refreshedToken ?? await NotificationService.pushToken();
+      if (token == null || token.trim().isEmpty) return;
+      _pushNotificationsActive = true;
+      final config = await MobileAccessStore.loadServerConfig();
+      if (config.baseUrl.trim().isEmpty) return;
+      final suffix =
+          token.length <= 18 ? token : token.substring(token.length - 18);
+      await ServerSyncClient.registerPushToken(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        pushToken: token,
+        deviceId: 'fcm-${widget.user.id}-$suffix',
+        platform: Platform.operatingSystem,
+      );
+    } catch (_) {
+      // Push registration retries the next time the user opens the app.
+    }
   }
 
   void _scheduleDataPreload({
@@ -705,7 +751,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           .toList()
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       for (final order in newOrders) {
-        await NotificationService.showNewOrder(order);
+        if (!_pushNotificationsActive) {
+          await NotificationService.showNewOrder(order);
+        }
       }
       final changedStatusOrders = orders
           .where((order) =>
@@ -716,7 +764,9 @@ class _MobileHomeScreenState extends State<MobileHomeScreen> {
           .toList()
         ..sort((a, b) => a.statusUpdatedAt.compareTo(b.statusUpdatedAt));
       for (final order in changedStatusOrders) {
-        await NotificationService.showOrderStatusChanged(order);
+        if (!_pushNotificationsActive) {
+          await NotificationService.showOrderStatusChanged(order);
+        }
       }
     } catch (_) {
       // Background order sync should not interrupt normal mobile use.
@@ -2776,7 +2826,10 @@ class _MobileInvoicesTabState extends State<MobileInvoicesTab> {
       backgroundColor: Colors.white,
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => MobileInvoiceDetailScreen(invoice: invoice),
+          builder: (_) => MobileInvoiceDetailScreen(
+            invoice: invoice,
+            user: widget.user,
+          ),
         ),
       ),
     );
@@ -3029,7 +3082,10 @@ class _MobileCustomersTabState extends State<MobileCustomersTab> {
       margin: const EdgeInsets.only(bottom: 10),
       onTap: () => Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => MobileCustomerDetailScreen(customer: customer),
+          builder: (_) => MobileCustomerDetailScreen(
+            customer: customer,
+            user: widget.user,
+          ),
         ),
       ),
     );
@@ -3274,6 +3330,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
   bool _initialFactoryTruckSyncDone = false;
   int _activeOrderDrags = 0;
   List<MobileOrder> _orders = const [];
+  List<Invoice> _returnInvoices = const [];
   List<GodownStockInEntry> _godownStockIns = const [];
 
   bool _compactOrders(BuildContext context) {
@@ -3352,15 +3409,19 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
       MobileAccessStore.loadOrders(),
       MobileAccessStore.loadSurjaniTrucks(),
       MobileAccessStore.loadFactoryTrucks(),
+      Store.loadAll(),
     ]);
     final orders = results[0] as List<MobileOrder>;
     final allTrucks = results[1] as List<MobileTruck>;
     final allFactoryTrucks = results[2] as List<MobileTruck>;
+    final invoices = results[3] as List<Invoice>;
     final trucks = _trucksForSelectedDate(allTrucks);
     final factoryTrucks = _trucksForSelectedDate(allFactoryTrucks);
     if (!mounted) return;
     setState(() {
       _orders = orders;
+      _returnInvoices = invoices.where((invoice) => invoice.isReturn).toList()
+        ..sort((a, b) => b.sNo.compareTo(a.sNo));
       _replaceSurjaniTrucksIfChanged(trucks);
       _replaceFactoryTrucksIfChanged(factoryTrucks);
       _loading = false;
@@ -3908,12 +3969,132 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     }
   }
 
+  Future<void> _openWalkInSaleForm() async {
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => MobileWalkInSaleScreen(
+          user: widget.user,
+          initialDate: _selectedOrderDate,
+        ),
+      ),
+    );
+    if (saved == true) {
+      await _load();
+    }
+  }
+
   List<MobileOrder> _ordersForSite(String site) {
     return _orders
         .where((order) =>
             order.orderSite.trim().toLowerCase() == site.toLowerCase() &&
             order.orderDate == _selectedOrderDate)
         .toList();
+  }
+
+  List<Invoice> _returnsForSelectedDate() {
+    final selected = DateTime.tryParse(_selectedOrderDate);
+    if (selected == null) return const [];
+    return _returnInvoices.where((invoice) {
+      try {
+        final date = parseInvoiceDate(invoice.date);
+        return date.year == selected.year &&
+            date.month == selected.month &&
+            date.day == selected.day;
+      } catch (_) {
+        return false;
+      }
+    }).toList();
+  }
+
+  Widget _returnRow(Invoice invoice) {
+    final compact = _compactOrders(context);
+    const color = Color(0xFFC62828);
+    final returnedBags = invoice.lines.fold<int>(
+      0,
+      (sum, line) => sum + (line.qty < 0 ? line.qty.abs() : 0),
+    );
+    final itemSummary = invoice.lines
+        .where((line) => line.qty < 0)
+        .map((line) =>
+            '${line.qty.abs()} ${line.brand.trim().isEmpty ? line.typeLabel : line.brand.trim()}')
+        .join(', ');
+    return Padding(
+      padding: EdgeInsets.only(bottom: compact ? 4 : 6),
+      child: AppPressable(
+        onTap: () async {
+          final deleted = await Navigator.of(context).push<bool>(
+            MaterialPageRoute(
+              builder: (_) => MobileInvoiceDetailScreen(
+                invoice: invoice,
+                user: widget.user,
+              ),
+            ),
+          );
+          if (deleted == true) await _load();
+        },
+        borderRadius: BorderRadius.circular(8),
+        child: Material(
+          color: const Color(0xFFFFEBEE),
+          borderRadius: BorderRadius.circular(8),
+          child: ListTile(
+            dense: true,
+            isThreeLine: !compact,
+            minVerticalPadding: compact ? 4 : null,
+            visualDensity: compact
+                ? const VisualDensity(horizontal: -2, vertical: -3)
+                : VisualDensity.compact,
+            contentPadding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10),
+            leading: const Icon(Icons.assignment_return, color: color),
+            title: Text(
+              'RETURN #${invoice.sNo} • Invoice #${invoice.returnOfInvoiceNo ?? '-'}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontWeight: FontWeight.w800,
+                fontSize: compact ? 12 : null,
+              ),
+            ),
+            subtitle: Text(
+              [
+                invoice.customer,
+                if (itemSummary.isNotEmpty) itemSummary,
+                'Returned to Godown',
+              ].join(' - '),
+              maxLines: compact ? 1 : 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: compact ? 11 : 12),
+            ),
+            trailing: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '$returnedBags bags',
+                  style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.w800,
+                    fontSize: compact ? 11 : 12,
+                  ),
+                ),
+                Text(
+                  'Rs ${fmt0(invoice.balance.abs())}',
+                  style: const TextStyle(
+                    color: color,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            shape: RoundedRectangleBorder(
+              side: const BorderSide(color: color, width: 1.2),
+              borderRadius: BorderRadius.circular(8),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   bool _siteUsesTruckPlanning(String site) {
@@ -4030,6 +4211,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     required bool compact,
   }) {
     final subtitle = _orderSubtitle(order, compact: compact);
+    final isWalkIn = order.note.trim().toLowerCase().startsWith('walk-in sale');
     var quantityLabel = '${order.bagsQuantity} ${order.bagsType}';
     if (zeroCancelled && order.status == MobileOrderStatus.cancelled) {
       quantityLabel = '0 ${order.bagsType}';
@@ -4051,7 +4233,7 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
                 : VisualDensity.compact,
             contentPadding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10),
             title: Text(
-              'Plot ${order.plotNo}',
+              isWalkIn ? 'WALK-IN SALE' : 'Plot ${order.plotNo}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: compact ? const TextStyle(fontSize: 13) : null,
@@ -4207,12 +4389,15 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
     final orders = _ordersForSite(site);
     final isSurjani = site.toLowerCase() == 'surjani';
     final isFactory = site.toLowerCase() == 'factory';
+    final isGodown = site.toLowerCase() == 'godown';
+    final returns = isGodown ? _returnsForSelectedDate() : const <Invoice>[];
+    final entryCount = orders.length + returns.length;
     final children = <Widget>[
       if (isSurjani)
         _surjaniTruckPlanner()
       else if (isFactory)
         _factoryTruckPlanner()
-      else if (orders.isEmpty)
+      else if (orders.isEmpty && returns.isEmpty)
         const Padding(
           padding: EdgeInsets.only(bottom: 12),
           child: Align(
@@ -4220,8 +4405,10 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
             child: Text('No orders.'),
           ),
         )
-      else
+      else ...[
         ...orders.map(_orderRow),
+        ...returns.map(_returnRow),
+      ],
     ];
     final section = AppExpandableCard(
       margin: EdgeInsets.only(bottom: compact ? 6 : 10),
@@ -4229,13 +4416,15 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
           EdgeInsets.fromLTRB(12, compact ? 8 : 12, 8, compact ? 8 : 12),
       childrenPadding: EdgeInsets.fromLTRB(12, 0, 12, compact ? 10 : 14),
       title: Text(
-        '$site (${orders.length})',
+        '$site ($entryCount)',
         style: const TextStyle(fontWeight: FontWeight.w800),
       ),
       subtitle: Text(
         isSurjani || isFactory
             ? 'Trucks and assigned orders'
-            : 'Orders for selected date',
+            : isGodown
+                ? 'Orders and buyer returns for selected date'
+                : 'Orders for selected date',
         style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
       ),
       expandedColor:
@@ -4268,11 +4457,15 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
               borderColor:
                   hover ? const Color(0xFF00838F) : const Color(0xFFE2EAED),
               title: Text(
-                hover ? 'Drop to $site' : '$site (${orders.length})',
+                hover ? 'Drop to $site' : '$site ($entryCount)',
                 style: const TextStyle(fontWeight: FontWeight.w800),
               ),
               subtitle: Text(
-                hover ? 'Release order here' : 'Orders for selected date',
+                hover
+                    ? 'Release order here'
+                    : isGodown
+                        ? 'Orders and buyer returns for selected date'
+                        : 'Orders for selected date',
                 style: const TextStyle(fontSize: 12, color: Color(0xFF5F6368)),
               ),
               children: children,
@@ -5174,10 +5367,300 @@ class _MobileOrdersTabState extends State<MobileOrdersTab> {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openOrderForm(),
-        icon: const Icon(Icons.add),
-        label: const Text('Order'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'walk-in-sale',
+            onPressed: _openWalkInSaleForm,
+            icon: const Icon(Icons.point_of_sale_outlined),
+            label: const Text('Walk-in'),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.extended(
+            heroTag: 'new-order',
+            onPressed: () => _openOrderForm(),
+            icon: const Icon(Icons.add),
+            label: const Text('Order'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MobileWalkInSaleScreen extends StatefulWidget {
+  final AppUser user;
+  final String initialDate;
+
+  const MobileWalkInSaleScreen({
+    super.key,
+    required this.user,
+    required this.initialDate,
+  });
+
+  @override
+  State<MobileWalkInSaleScreen> createState() => _MobileWalkInSaleScreenState();
+}
+
+class _MobileWalkInSaleScreenState extends State<MobileWalkInSaleScreen> {
+  late final TextEditingController _dateCtrl;
+  late final String _orderId;
+  final _brandCtrl = TextEditingController();
+  final _brandFocus = FocusNode();
+  final _qtyCtrl = TextEditingController();
+  final _rateCtrl = TextEditingController();
+  final _cartageCtrl = TextEditingController(text: '0');
+  final _paymentNoteCtrl = TextEditingController();
+  String _type = kItemTypes.first;
+  String _site = kShipmentSites.first;
+  PaymentType _paymentType = PaymentType.cash;
+  InvoiceDraftSuggestions _suggestions = const InvoiceDraftSuggestions.empty();
+  bool _suggestionsLoading = false;
+  bool _suggestionsLoaded = false;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _orderId = MobileAccessStore.nextOrderId();
+    _dateCtrl = TextEditingController(text: widget.initialDate);
+    unawaited(_loadSuggestions());
+  }
+
+  @override
+  void dispose() {
+    _dateCtrl.dispose();
+    _brandCtrl.dispose();
+    _brandFocus.dispose();
+    _qtyCtrl.dispose();
+    _rateCtrl.dispose();
+    _cartageCtrl.dispose();
+    _paymentNoteCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadSuggestions() async {
+    if (_suggestionsLoading || _suggestionsLoaded) return;
+    _suggestionsLoading = true;
+    try {
+      final suggestions = await InvoiceDraftSuggestions.load();
+      if (!mounted) return;
+      setState(() {
+        _suggestions = suggestions;
+        _suggestionsLoaded = true;
+      });
+    } catch (_) {
+      // The sale form remains usable when local suggestions cannot be loaded.
+    } finally {
+      _suggestionsLoading = false;
+    }
+  }
+
+  Iterable<String> _brandOptions(String query) {
+    return _suggestions.brandOptionsFor(_site, _type, query);
+  }
+
+  Future<void> _pickDate() async {
+    final initial = DateTime.tryParse(_dateCtrl.text.trim()) ?? DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null) return;
+    setState(() => _dateCtrl.text = picked.toIso8601String().split('T').first);
+  }
+
+  List<ItemLine>? _buildInvoiceLines() {
+    final brand = _brandCtrl.text.trim();
+    final qty = int.tryParse(_qtyCtrl.text.trim()) ?? 0;
+    final rate = double.tryParse(_rateCtrl.text.trim()) ?? 0;
+    if (brand.isEmpty || qty <= 0 || rate <= 0) {
+      showErr(context, 'Brand, quantity, and rate are required.');
+      return null;
+    }
+    return [ItemLine(_type, brand: brand, qty: qty, rate: rate)];
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final lines = _buildInvoiceLines();
+    if (lines == null) return;
+    final cartage = double.tryParse(_cartageCtrl.text.trim()) ?? 0;
+    if (cartage < 0) {
+      showErr(context, 'Cartage cannot be negative.');
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      final invoice = await ServerSyncClient.recordWalkInInvoice(
+        baseUrl: config.baseUrl,
+        username: widget.user.username,
+        passcode: widget.user.passcode,
+        invoiceDate: _dateCtrl.text.trim(),
+        customer: 'Walk-in Customer',
+        contact: '',
+        address: '',
+        site: _site,
+        lines: lines,
+        cartage: cartage,
+        paymentType: _paymentType,
+        orderId: _orderId,
+        paymentNote: _paymentNoteCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      showOk(context, 'Walk-in invoice #${invoice.sNo} saved.');
+      Navigator.of(context).pop(true);
+    } on ServerSyncException catch (e) {
+      if (!mounted) return;
+      showErr(context, e.message);
+    } catch (e) {
+      if (!mounted) return;
+      showErr(context, 'Could not save walk-in sale: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+      for (final line in lines) {
+        line.dispose();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Walk-in Sale')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: _dateCtrl,
+            readOnly: true,
+            onTap: _pickDate,
+            decoration: const InputDecoration(
+              labelText: 'Sale date',
+              suffixIcon: Icon(Icons.calendar_today_outlined),
+            ),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: _site,
+            items: kShipmentSites
+                .map((site) => DropdownMenuItem(value: site, child: Text(site)))
+                .toList(),
+            onChanged: (value) =>
+                setState(() => _site = value ?? kShipmentSites.first),
+            decoration: const InputDecoration(labelText: 'Shipment Site'),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: _type,
+            items: kItemTypes
+                .map((type) => DropdownMenuItem(value: type, child: Text(type)))
+                .toList(),
+            onChanged: (value) =>
+                setState(() => _type = value ?? kItemTypes.first),
+            decoration: const InputDecoration(labelText: 'Type'),
+          ),
+          const SizedBox(height: 10),
+          RawAutocomplete<String>(
+            textEditingController: _brandCtrl,
+            focusNode: _brandFocus,
+            optionsBuilder: (text) => _brandOptions(text.text),
+            onSelected: (value) => _brandCtrl.text = value,
+            fieldViewBuilder: (context, controller, focusNode, onSubmitted) {
+              return TextField(
+                controller: controller,
+                focusNode: focusNode,
+                onTap: () => unawaited(_loadSuggestions()),
+                decoration: const InputDecoration(labelText: 'Brand / company'),
+              );
+            },
+            optionsViewBuilder: (context, onSelected, options) {
+              return Align(
+                alignment: Alignment.topLeft,
+                child: Material(
+                  elevation: 4,
+                  borderRadius: BorderRadius.circular(8),
+                  child: ConstrainedBox(
+                    constraints:
+                        const BoxConstraints(maxHeight: 220, maxWidth: 320),
+                    child: ListView.builder(
+                      padding: EdgeInsets.zero,
+                      shrinkWrap: true,
+                      itemCount: options.length,
+                      itemBuilder: (context, index) {
+                        final option = options.elementAt(index);
+                        return ListTile(
+                          dense: true,
+                          title: Text(option),
+                          onTap: () => onSelected(option),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _qtyCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Qty'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: _rateCtrl,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(labelText: 'Rate'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _cartageCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: const InputDecoration(labelText: 'Cartage optional'),
+          ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<PaymentType>(
+            initialValue: _paymentType,
+            items: PaymentType.values
+                .map((type) => DropdownMenuItem(
+                      value: type,
+                      child: Text(paymentTypeLabel(type)),
+                    ))
+                .toList(),
+            onChanged: (value) =>
+                setState(() => _paymentType = value ?? PaymentType.cash),
+            decoration: const InputDecoration(labelText: 'Payment type'),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _paymentNoteCtrl,
+            textCapitalization: TextCapitalization.sentences,
+            decoration: const InputDecoration(
+              labelText: 'Payment note (optional)',
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            onPressed: _saving ? null : _save,
+            icon: const Icon(Icons.check),
+            label: Text(_saving ? 'Saving...' : 'Save walk-in sale'),
+          ),
+        ],
       ),
     );
   }
@@ -5797,6 +6280,46 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
     }
   }
 
+  Future<void> _returnRecordedInvoice() async {
+    final invoiceNo = widget.order?.recordedInvoiceNo;
+    if (invoiceNo == null || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final invoices = await Store.loadAll();
+      final invoice = invoices.cast<Invoice?>().firstWhere(
+            (item) => item != null && item.sNo == invoiceNo,
+            orElse: () => null,
+          );
+      if (invoice == null) {
+        if (!mounted) return;
+        showErr(context, 'Invoice #$invoiceNo not found. Sync and try again.');
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _saving = false);
+      final result = await Navigator.of(context).push<Invoice?>(
+        MaterialPageRoute(
+          builder: (_) => InvoiceScreen(
+            editing: true,
+            initialInvoice: invoice,
+            startReturnFlow: true,
+            draftUser: widget.user,
+          ),
+        ),
+      );
+      if (!mounted) return;
+      if (result != null && result.isReturn) {
+        showOk(context, 'Return #${result.sNo} recorded.');
+        Navigator.of(context).pop(true);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      showErr(context, 'Could not record return: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   Future<void> _deleteOrder() async {
     final order = widget.order;
     if (order == null) return;
@@ -6114,6 +6637,12 @@ class _MobileOrderFormScreenState extends State<MobileOrderFormScreen> {
                 onPressed: _saving ? null : _editRecordedInvoice,
                 icon: const Icon(Icons.edit_note_outlined),
                 label: const Text('Edit Entry'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _saving ? null : _returnRecordedInvoice,
+                icon: const Icon(Icons.assignment_return_outlined),
+                label: const Text('Return'),
               ),
               const SizedBox(height: 12),
             ] else if (widget.order!.status == MobileOrderStatus.delivered) ...[
@@ -6498,8 +7027,52 @@ class _MobileSyncSettingsTabState extends State<MobileSyncSettingsTab> {
 
 class MobileInvoiceDetailScreen extends StatelessWidget {
   final Invoice invoice;
+  final AppUser user;
 
-  const MobileInvoiceDetailScreen({super.key, required this.invoice});
+  const MobileInvoiceDetailScreen({
+    super.key,
+    required this.invoice,
+    required this.user,
+  });
+
+  Future<void> _deleteReturn(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete Return'),
+        content: Text(
+          'Delete return #${invoice.sNo}? Its ledger, history and godown effects will also be removed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    try {
+      final config = await MobileAccessStore.loadServerConfig();
+      await ServerSyncClient.deleteInvoiceReturn(
+        baseUrl: config.baseUrl,
+        username: user.username,
+        passcode: user.passcode,
+        invoiceNo: invoice.sNo,
+      );
+      if (!context.mounted) return;
+      showOk(context, 'Return #${invoice.sNo} deleted.');
+      Navigator.of(context).pop(true);
+    } on ServerSyncException catch (e) {
+      if (!context.mounted) return;
+      showErr(context, e.message);
+    }
+  }
 
   Future<void> _sendPdf(BuildContext context) async {
     try {
@@ -6521,19 +7094,33 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isReturn = invoice.isReturn;
+    const returnColor = Color(0xFFC62828);
     return Scaffold(
-      appBar: AppBar(title: Text('Invoice #${invoice.sNo}')),
+      appBar: AppBar(
+        title: Text(
+            isReturn ? 'Return #${invoice.sNo}' : 'Invoice #${invoice.sNo}'),
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           _DetailCard(
             title: invoice.customer,
-            subtitle: 'Invoice #${invoice.sNo}',
+            subtitle: isReturn
+                ? 'Return #${invoice.sNo} of Invoice #${invoice.returnOfInvoiceNo ?? '-'}'
+                : 'Invoice #${invoice.sNo}',
             trailing: AppStatusPill(
-              text: 'Rs ${fmt0(invoice.balance)}',
-              color: const Color(0xFF4B5DFF),
+              text: isReturn
+                  ? 'RETURN Rs ${fmt0(invoice.balance.abs())}'
+                  : 'Rs ${fmt0(invoice.balance)}',
+              color: isReturn ? returnColor : const Color(0xFF4B5DFF),
             ),
             children: [
+              if (isReturn)
+                _detailRow(
+                  'Original invoice',
+                  '#${invoice.returnOfInvoiceNo ?? '-'}',
+                ),
               _detailRow('Customer ID', invoice.customerId),
               _detailRow('Contact', invoice.contact),
               _detailRow('Address', invoice.address),
@@ -6545,13 +7132,24 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
                 icon: const Icon(Icons.ios_share_outlined),
                 label: const Text('Send PDF'),
               ),
+              if (isReturn) ...[
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: () => _deleteReturn(context),
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('Delete return'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: returnColor,
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 12),
           _DetailCard(
-            title: 'Items',
+            title: isReturn ? 'Returned items' : 'Items',
             children: invoice.lines
-                .where((line) => line.qty > 0)
+                .where((line) => line.qty != 0)
                 .map(
                   (line) => Padding(
                     padding: const EdgeInsets.only(bottom: 8),
@@ -6573,9 +7171,10 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
                                 ),
                               ),
                               Text(
-                                'Rs ${fmt0(line.amount)}',
-                                style: const TextStyle(
+                                'Rs ${fmt0(isReturn ? line.amount.abs() : line.amount)}',
+                                style: TextStyle(
                                   fontWeight: FontWeight.w700,
+                                  color: isReturn ? returnColor : null,
                                 ),
                               ),
                             ],
@@ -6590,7 +7189,17 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              AppMetaChip(text: 'Qty ${line.qty}'),
+                              AppMetaChip(
+                                text: isReturn
+                                    ? 'Returned ${line.qty.abs()}'
+                                    : 'Qty ${line.qty}',
+                                foregroundColor: isReturn
+                                    ? returnColor
+                                    : const Color(0xFF364056),
+                                backgroundColor: isReturn
+                                    ? const Color(0xFFFFEBEE)
+                                    : Colors.white,
+                              ),
                               AppMetaChip(text: 'Rate ${fmt0(line.rate)}'),
                             ],
                           ),
@@ -6603,14 +7212,22 @@ class MobileInvoiceDetailScreen extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           _DetailCard(
-            title: 'Totals',
-            children: [
-              _detailRow('Items total', 'Rs ${fmt0(invoice.total)}'),
-              _detailRow('Cartage', 'Rs ${fmt0(invoice.cartage)}'),
-              _detailRow('Bill total', 'Rs ${fmt0(invoice.balance)}'),
-              _detailRow('Paid', 'Rs ${fmt0(invoice.paid)}'),
-              _detailRow('Remaining', 'Rs ${fmt0(invoice.remaining)}'),
-            ],
+            title: isReturn ? 'Return total' : 'Totals',
+            children: isReturn
+                ? [
+                    _detailRow(
+                      'Returned value',
+                      'Rs ${fmt0(invoice.balance.abs())}',
+                    ),
+                    _detailRow('Stock destination', 'Godown'),
+                  ]
+                : [
+                    _detailRow('Items total', 'Rs ${fmt0(invoice.total)}'),
+                    _detailRow('Cartage', 'Rs ${fmt0(invoice.cartage)}'),
+                    _detailRow('Bill total', 'Rs ${fmt0(invoice.balance)}'),
+                    _detailRow('Paid', 'Rs ${fmt0(invoice.paid)}'),
+                    _detailRow('Remaining', 'Rs ${fmt0(invoice.remaining)}'),
+                  ],
           ),
         ],
       ),
@@ -6656,8 +7273,13 @@ class MobilePaymentDetailScreen extends StatelessWidget {
 
 class MobileCustomerDetailScreen extends StatefulWidget {
   final Customer customer;
+  final AppUser user;
 
-  const MobileCustomerDetailScreen({super.key, required this.customer});
+  const MobileCustomerDetailScreen({
+    super.key,
+    required this.customer,
+    required this.user,
+  });
 
   @override
   State<MobileCustomerDetailScreen> createState() =>
@@ -6756,7 +7378,9 @@ class _MobileCustomerDetailScreenState
                               onTap: () => Navigator.of(context).push(
                                 MaterialPageRoute(
                                   builder: (_) => MobileInvoiceDetailScreen(
-                                      invoice: invoice),
+                                    invoice: invoice,
+                                    user: widget.user,
+                                  ),
                                 ),
                               ),
                               title: Text('#${invoice.sNo} - ${invoice.date}'),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -23,12 +24,6 @@ class ServerSyncResult {
   });
 }
 
-class ServerDraftSubmitResult {
-  final String draftCode;
-
-  const ServerDraftSubmitResult({required this.draftCode});
-}
-
 class ServerOrderSaveResult {
   final MobileOrder order;
 
@@ -45,7 +40,32 @@ class ServerAuthResult {
   });
 }
 
+class _CachedServerAuth {
+  final String baseUrl;
+  final String username;
+  final String passcode;
+  final ServerAuthResult result;
+  final DateTime expiresAt;
+
+  const _CachedServerAuth({
+    required this.baseUrl,
+    required this.username,
+    required this.passcode,
+    required this.result,
+    required this.expiresAt,
+  });
+}
+
 class ServerSyncClient {
+  static const _authLifetime = Duration(minutes: 30);
+  static final HttpClient _httpClient = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 10)
+    ..idleTimeout = const Duration(seconds: 30)
+    ..maxConnectionsPerHost = 6;
+  static final Map<String, _CachedServerAuth> _authByKey = {};
+  static final Map<String, _CachedServerAuth> _authByToken = {};
+  static final Map<String, Future<ServerAuthResult>> _authInFlight = {};
+
   static Future<void> testConnection(String baseUrl) async {
     final uri = Uri.parse('${_normalizeBaseUrl(baseUrl)}/health');
     final response = await _requestJson(uri);
@@ -619,6 +639,148 @@ class ServerSyncClient {
     return ServerOrderSaveResult(order: saved);
   }
 
+  static Future<Invoice> recordWalkInInvoice({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required String invoiceDate,
+    required String customer,
+    required String contact,
+    required String address,
+    required String site,
+    required List<ItemLine> lines,
+    required double cartage,
+    required PaymentType paymentType,
+    required String orderId,
+    String? paymentNote,
+    String? bank,
+    String? chequeNo,
+    String? txnId,
+    String? bankMode,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    final body = <String, dynamic>{
+      'orderId': orderId,
+      'invoiceDate': invoiceDate,
+      'customer': customer,
+      'contact': contact,
+      'address': address,
+      'site': site,
+      'lines': lines.map((line) => line.toJson()).toList(),
+      'cartage': cartage,
+      'paymentType': paymentTypeLabel(paymentType),
+      if ((paymentNote ?? '').trim().isNotEmpty)
+        'paymentNote': paymentNote!.trim(),
+      if ((bank ?? '').trim().isNotEmpty) 'bank': bank!.trim(),
+      if ((chequeNo ?? '').trim().isNotEmpty) 'chequeNo': chequeNo!.trim(),
+      if ((txnId ?? '').trim().isNotEmpty) 'txnId': txnId!.trim(),
+      if ((bankMode ?? '').trim().isNotEmpty) 'bankMode': bankMode!.trim(),
+    };
+    final Map<String, dynamic> response;
+    try {
+      response = await _requestJson(
+        Uri.parse('$normalized/walk-in-invoices'),
+        method: 'POST',
+        headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+        body: body,
+      );
+    } on ServerSyncException catch (e) {
+      if (_isRouteNotFound(e)) {
+        throw const ServerSyncException(
+          'Walk-in sale recording is not available on this laptop server yet. Restart the laptop app after updating it.',
+        );
+      }
+      rethrow;
+    }
+    final invoiceJson = response['invoice'] is Map<String, dynamic>
+        ? response['invoice'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final invoice = Invoice.fromJson(invoiceJson);
+    if (invoice.sNo <= 0) {
+      throw const ServerSyncException('Server did not return invoice.');
+    }
+    await Store.upsertInvoice(invoice);
+    final orderJson = response['order'];
+    if (orderJson is Map<String, dynamic>) {
+      final order = MobileOrder.fromJson(orderJson);
+      if (order.id.trim().isNotEmpty) {
+        await MobileAccessStore.upsertOrder(
+          order,
+          preserveLocalFields: false,
+        );
+      }
+    }
+    return invoice;
+  }
+
+  static Future<Invoice> recordInvoiceReturn({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required int sourceInvoiceNo,
+    required String returnDate,
+    required List<ItemLine> lines,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    final canonicalLines = lines
+        .map((line) => {
+              'type': line.typeLabel.trim(),
+              'brand': line.brand.trim(),
+              'qty': line.qty.abs(),
+            })
+        .toList()
+      ..sort((a, b) =>
+          '${a['type']}|${a['brand']}'.compareTo('${b['type']}|${b['brand']}'));
+    final requestId = base64Url
+        .encode(utf8.encode(jsonEncode({
+          'invoice': sourceInvoiceNo,
+          'date': returnDate,
+          'lines': canonicalLines,
+        })))
+        .replaceAll('=', '');
+    final Map<String, dynamic> response;
+    try {
+      response = await _requestJson(
+        Uri.parse('$normalized/invoice-returns'),
+        method: 'POST',
+        headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+        body: {
+          'requestId': 'MRET-$requestId',
+          'sourceInvoiceNo': sourceInvoiceNo,
+          'returnDate': returnDate,
+          'lines': canonicalLines,
+        },
+      );
+    } on ServerSyncException catch (error) {
+      if (_isRouteNotFound(error)) {
+        throw const ServerSyncException(
+          'Mobile returns are not available on this laptop server yet. Install and restart the updated laptop app.',
+        );
+      }
+      rethrow;
+    }
+    final invoiceJson = response['invoice'] is Map<String, dynamic>
+        ? response['invoice'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final invoice = Invoice.fromJson(invoiceJson);
+    if (invoice.sNo <= 0 || !invoice.isReturn) {
+      throw const ServerSyncException(
+          'Server did not return the saved return.');
+    }
+    await Store.upsertInvoice(invoice);
+    return invoice;
+  }
+
   static Future<void> deleteOrder({
     required String baseUrl,
     required String username,
@@ -647,6 +809,35 @@ class ServerSyncClient {
       rethrow;
     }
     await MobileAccessStore.deleteOrder(orderId);
+  }
+
+  static Future<void> deleteInvoiceReturn({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required int invoiceNo,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    try {
+      await _requestJson(
+        Uri.parse('$normalized/invoice-returns/$invoiceNo'),
+        method: 'DELETE',
+        headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+      );
+    } on ServerSyncException catch (e) {
+      if (_isRouteNotFound(e)) {
+        throw const ServerSyncException(
+          'Return delete is not available on this laptop server yet. Restart the laptop app after updating it.',
+        );
+      }
+      rethrow;
+    }
+    await Store.deleteInvoice(invoiceNo);
   }
 
   static MobileOrder _applyOrderPayload(
@@ -690,32 +881,6 @@ class ServerSyncClient {
           ? mobileOrderStatusFromString((payload['status'] ?? '').toString())
           : null,
     );
-  }
-
-  static Future<ServerDraftSubmitResult> submitDraftInvoice({
-    required String baseUrl,
-    required String username,
-    required String passcode,
-    required Map<String, dynamic> payload,
-  }) async {
-    final auth = await authenticateUser(
-      baseUrl: baseUrl,
-      username: username,
-      passcode: passcode,
-    );
-    final normalized = _normalizeBaseUrl(baseUrl);
-    final submitUri = Uri.parse('$normalized/pending-invoices');
-    final response = await _requestJson(
-      submitUri,
-      method: 'POST',
-      headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
-      body: payload,
-    );
-    final draftCode = (response['draftCode'] ?? '').toString();
-    if (draftCode.isEmpty) {
-      throw const ServerSyncException('Server did not return draft code.');
-    }
-    return ServerDraftSubmitResult(draftCode: draftCode);
   }
 
   static Future<void> submitPayment({
@@ -791,12 +956,73 @@ class ServerSyncClient {
     );
   }
 
+  static Future<void> registerPushToken({
+    required String baseUrl,
+    required String username,
+    required String passcode,
+    required String pushToken,
+    required String deviceId,
+    required String platform,
+  }) async {
+    final auth = await authenticateUser(
+      baseUrl: baseUrl,
+      username: username,
+      passcode: passcode,
+    );
+    final normalized = _normalizeBaseUrl(baseUrl);
+    await _requestJson(
+      Uri.parse('$normalized/push-tokens'),
+      method: 'POST',
+      headers: {HttpHeaders.authorizationHeader: 'Bearer ${auth.token}'},
+      body: {
+        'token': pushToken,
+        'deviceId': deviceId,
+        'platform': platform,
+      },
+    );
+  }
+
   static Future<ServerAuthResult> authenticateUser({
     required String baseUrl,
     required String username,
     required String passcode,
+    bool forceRefresh = false,
   }) async {
     final normalized = _normalizeBaseUrl(baseUrl);
+    final authKey = _authKey(normalized, username, passcode);
+    final cached = _authByKey[authKey];
+    if (!forceRefresh &&
+        cached != null &&
+        cached.expiresAt.isAfter(DateTime.now())) {
+      return cached.result;
+    }
+    if (cached != null) _removeCachedAuth(cached);
+
+    final inFlight = _authInFlight[authKey];
+    if (!forceRefresh && inFlight != null) return inFlight;
+
+    final login = _login(
+      normalized: normalized,
+      username: username,
+      passcode: passcode,
+      authKey: authKey,
+    );
+    _authInFlight[authKey] = login;
+    try {
+      return await login;
+    } finally {
+      if (identical(_authInFlight[authKey], login)) {
+        _authInFlight.remove(authKey);
+      }
+    }
+  }
+
+  static Future<ServerAuthResult> _login({
+    required String normalized,
+    required String username,
+    required String passcode,
+    required String authKey,
+  }) async {
     final loginUri = Uri.parse('$normalized/auth/login');
     final loginResponse = await _requestJson(
       loginUri,
@@ -811,7 +1037,7 @@ class ServerSyncClient {
         ? loginResponse['user'] as Map<String, dynamic>
         : const <String, dynamic>{};
     final now = DateTime.now().toIso8601String();
-    return ServerAuthResult(
+    final result = ServerAuthResult(
       token: token,
       user: AppUser(
         id: (userJson['id'] ?? '').toString(),
@@ -824,6 +1050,26 @@ class ServerSyncClient {
         updatedAt: now,
       ),
     );
+    final cached = _CachedServerAuth(
+      baseUrl: normalized,
+      username: username,
+      passcode: passcode,
+      result: result,
+      expiresAt: DateTime.now().add(_authLifetime),
+    );
+    _authByKey[authKey] = cached;
+    _authByToken[token] = cached;
+    return result;
+  }
+
+  static String _authKey(String baseUrl, String username, String passcode) =>
+      '$baseUrl\u0000${username.trim().toLowerCase()}\u0000$passcode';
+
+  static void _removeCachedAuth(_CachedServerAuth cached) {
+    _authByKey.remove(
+      _authKey(cached.baseUrl, cached.username, cached.passcode),
+    );
+    _authByToken.remove(cached.result.token);
   }
 
   static Future<Map<String, dynamic>> _requestJson(
@@ -831,17 +1077,16 @@ class ServerSyncClient {
     String method = 'GET',
     Map<String, dynamic>? body,
     Map<String, String>? headers,
+    bool allowAuthRetry = true,
   }) async {
-    final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 10);
     try {
       final HttpClientRequest request;
       if (method == 'POST') {
-        request = await client.postUrl(uri);
+        request = await _httpClient.postUrl(uri);
       } else if (method == 'DELETE') {
-        request = await client.deleteUrl(uri);
+        request = await _httpClient.deleteUrl(uri);
       } else {
-        request = await client.getUrl(uri);
+        request = await _httpClient.getUrl(uri);
       }
       headers?.forEach(request.headers.set);
       if (body != null) {
@@ -849,34 +1094,100 @@ class ServerSyncClient {
             ContentType('application', 'json', charset: 'utf-8');
         request.write(jsonEncode(body));
       }
-      final response = await request.close();
-      final text = await utf8.decodeStream(response);
+      final response = await request.close().timeout(
+            const Duration(seconds: 25),
+          );
+      final text = await utf8.decodeStream(response).timeout(
+            const Duration(seconds: 25),
+          );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        try {
-          final decoded = jsonDecode(text);
-          if (decoded is Map<String, dynamic> &&
-              (decoded['error'] ?? '').toString().trim().isNotEmpty) {
-            throw ServerSyncException((decoded['error'] ?? '').toString());
+        if (response.statusCode == HttpStatus.unauthorized && allowAuthRetry) {
+          final authorization =
+              headers?[HttpHeaders.authorizationHeader]?.trim() ?? '';
+          final token = authorization.toLowerCase().startsWith('bearer ')
+              ? authorization.substring(7).trim()
+              : '';
+          final cached = _authByToken[token];
+          if (cached != null) {
+            _removeCachedAuth(cached);
+            final refreshed = await authenticateUser(
+              baseUrl: cached.baseUrl,
+              username: cached.username,
+              passcode: cached.passcode,
+              forceRefresh: true,
+            );
+            return _requestJson(
+              uri,
+              method: method,
+              body: body,
+              headers: {
+                ...?headers,
+                HttpHeaders.authorizationHeader: 'Bearer ${refreshed.token}',
+              },
+              allowAuthRetry: false,
+            );
           }
-        } on FormatException {
-          // Fall through to the raw response text below.
         }
         throw ServerSyncException(
-          text.isEmpty ? 'Server request failed.' : text,
+          _readableHttpError(
+            statusCode: response.statusCode,
+            responseText: text,
+            cloudflareRay: response.headers.value('cf-ray'),
+          ),
         );
       }
-      final decoded = jsonDecode(text);
+      final dynamic decoded;
+      try {
+        decoded = jsonDecode(text);
+      } on FormatException {
+        if (_looksLikeHtml(text)) {
+          throw const ServerSyncException(
+            'The tunnel returned a web page instead of QuickBill data. '
+            'Check the Cloudflare hostname and Access rules. [INVALID RESPONSE]',
+          );
+        }
+        throw const ServerSyncException(
+          'The laptop returned unreadable data. Restart the updated laptop app. '
+          '[INVALID JSON]',
+        );
+      }
       if (decoded is! Map<String, dynamic>) {
-        throw const ServerSyncException('Server returned invalid JSON.');
+        throw const ServerSyncException(
+          'The laptop returned an unexpected response. Restart the laptop app. '
+          '[INVALID JSON]',
+        );
       }
       if ((decoded['error'] ?? '').toString().trim().isNotEmpty) {
         throw ServerSyncException((decoded['error'] ?? '').toString());
       }
       return decoded;
-    } on SocketException {
-      throw const ServerSyncException('Laptop server is not reachable.');
-    } finally {
-      client.close(force: true);
+    } on TimeoutException {
+      throw const ServerSyncException(
+        'The request timed out. Check the laptop internet connection and make '
+        'sure the Cloudflare tunnel is running. [TIMEOUT]',
+      );
+    } on HandshakeException {
+      throw const ServerSyncException(
+        'A secure connection could not be established. Check the Cloudflare '
+        'hostname and SSL certificate. [TLS]',
+      );
+    } on SocketException catch (error) {
+      final message = error.osError?.message.toLowerCase() ?? '';
+      if (message.contains('name') || message.contains('host')) {
+        throw const ServerSyncException(
+          'The Cloudflare hostname could not be found. Check the saved server '
+          'URL and internet connection. [DNS]',
+        );
+      }
+      throw const ServerSyncException(
+        'Could not reach the laptop through Cloudflare. Check internet on both '
+        'devices and confirm cloudflared is running. [NETWORK]',
+      );
+    } on HttpException {
+      throw const ServerSyncException(
+        'The connection ended before QuickBill received a complete response. '
+        'Restart the Cloudflare tunnel and try again. [CONNECTION]',
+      );
     }
   }
 
@@ -885,13 +1196,148 @@ class ServerSyncClient {
     if (trimmed.isEmpty) {
       throw const ServerSyncException('Server URL is required.');
     }
-    return trimmed.endsWith('/')
+    final normalized = trimmed.endsWith('/')
         ? trimmed.substring(0, trimmed.length - 1)
         : trimmed;
+    final uri = Uri.tryParse(normalized);
+    if (uri == null ||
+        !uri.hasScheme ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.trim().isEmpty) {
+      throw const ServerSyncException(
+        'Server URL is invalid. Use the full Cloudflare address, for example '
+        'https://quickbill.example.com. [INVALID URL]',
+      );
+    }
+    return normalized;
   }
 
   static bool _isRouteNotFound(ServerSyncException e) {
-    return e.message.toLowerCase().contains('route not found');
+    final message = e.message.toLowerCase();
+    return message.contains('route not found') ||
+        message.contains('[http 404]');
+  }
+
+  static String _readableHttpError({
+    required int statusCode,
+    required String responseText,
+    String? cloudflareRay,
+  }) {
+    final cloudflareCode = _cloudflareErrorCode(responseText);
+    final reference = (cloudflareRay ?? '').trim();
+    final suffix = [
+      if (cloudflareCode != null) 'CF $cloudflareCode',
+      'HTTP $statusCode',
+      if (reference.isNotEmpty) 'Ref $reference',
+    ].join(' | ');
+
+    if (cloudflareCode != null) {
+      return '${_cloudflareCodeMessage(cloudflareCode)} [$suffix]';
+    }
+
+    final serverMessage = _jsonErrorMessage(responseText);
+    switch (statusCode) {
+      case HttpStatus.badRequest:
+        return '${serverMessage ?? 'The request was not accepted. Update both the mobile and laptop apps, then try again.'} [$suffix]';
+      case HttpStatus.unauthorized:
+        return 'Login was rejected. Check the username and passcode, then log in again. [$suffix]';
+      case HttpStatus.forbidden:
+        return 'Cloudflare or QuickBill blocked this request. Check Cloudflare Access rules and the user role. [$suffix]';
+      case HttpStatus.notFound:
+        return 'This QuickBill feature was not found on the laptop. Restart or update the laptop app and verify the tunnel URL. [$suffix]';
+      case HttpStatus.methodNotAllowed:
+        return 'The laptop does not support this operation yet. Update and restart the laptop app. [$suffix]';
+      case HttpStatus.requestTimeout:
+        return 'The request timed out before reaching QuickBill. Check cloudflared and try again. [$suffix]';
+      case HttpStatus.conflict:
+        return '${serverMessage ?? 'The record changed on another device. Sync and try again.'} [$suffix]';
+      case HttpStatus.requestEntityTooLarge:
+        return 'The request is too large for the Cloudflare tunnel. [$suffix]';
+      case HttpStatus.tooManyRequests:
+        return 'Too many requests were sent. Wait a moment and try again. [$suffix]';
+      case HttpStatus.internalServerError:
+        return '${serverMessage ?? 'QuickBill encountered an error on the laptop. Restart the laptop app and try again.'} [$suffix]';
+      case HttpStatus.badGateway:
+        return 'Cloudflare is online, but it cannot reach the QuickBill laptop server. Make sure the laptop app and cloudflared are running. [$suffix]';
+      case HttpStatus.serviceUnavailable:
+        return 'The QuickBill tunnel is temporarily unavailable. Check cloudflared on the laptop. [$suffix]';
+      case HttpStatus.gatewayTimeout:
+        return 'Cloudflare reached the tunnel, but the laptop took too long to respond. [$suffix]';
+      case 520:
+        return 'Cloudflare received an unexpected response from the laptop. Restart QuickBill and cloudflared. [$suffix]';
+      case 521:
+        return 'Cloudflare could not connect to the laptop server. Open QuickBill and check its local server. [$suffix]';
+      case 522:
+        return 'Cloudflare timed out while connecting to the laptop. Check the laptop internet and tunnel. [$suffix]';
+      case 523:
+        return 'Cloudflare cannot find the tunnel origin. Check the tunnel hostname and DNS route. [$suffix]';
+      case 524:
+        return 'The laptop connection was made, but QuickBill did not respond in time. [$suffix]';
+      case 525:
+        return 'Cloudflare could not complete the SSL handshake. Check the tunnel certificate settings. [$suffix]';
+      case 526:
+        return 'Cloudflare rejected the origin SSL certificate. Check the tunnel SSL mode. [$suffix]';
+      case 530:
+        return 'Cloudflare cannot route this hostname to a healthy tunnel. Check that cloudflared is connected. [$suffix]';
+      default:
+        return '${serverMessage ?? 'The server request failed.'} [$suffix]';
+    }
+  }
+
+  static String? _jsonErrorMessage(String text) {
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is! Map<String, dynamic>) return null;
+      final error = decoded['error'];
+      if (error is String && error.trim().isNotEmpty) return error.trim();
+      if (error is Map<String, dynamic>) {
+        final message = (error['message'] ?? '').toString().trim();
+        if (message.isNotEmpty) return message;
+      }
+      final message = (decoded['message'] ?? '').toString().trim();
+      return message.isEmpty ? null : message;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static int? _cloudflareErrorCode(String text) {
+    final patterns = <RegExp>[
+      RegExp(r'error\s*code\s*[:#]?\s*(\d{3,4})', caseSensitive: false),
+      RegExp(r'cloudflare[^\d]{0,40}(\d{3,4})', caseSensitive: false),
+      RegExp(r'<span[^>]*class="code-label"[^>]*>[^\d]*(\d{3,4})',
+          caseSensitive: false),
+    ];
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(text);
+      final code = int.tryParse(match?.group(1) ?? '');
+      if (code != null) return code;
+    }
+    return null;
+  }
+
+  static String _cloudflareCodeMessage(int code) {
+    switch (code) {
+      case 1000:
+        return 'Cloudflare DNS points to an address it cannot use. Check the tunnel DNS route.';
+      case 1001:
+        return 'Cloudflare could not resolve the configured hostname. Check the tunnel DNS record.';
+      case 1016:
+        return 'Cloudflare cannot resolve the tunnel origin. Recheck the public hostname configuration.';
+      case 1020:
+        return 'Cloudflare Access or firewall rules denied this phone. Allow the QuickBill API hostname.';
+      case 1033:
+        return 'Cloudflare cannot find a healthy QuickBill tunnel. Start cloudflared on the laptop and check its connection.';
+      default:
+        return 'Cloudflare rejected the connection. Check the tunnel dashboard using the code shown.';
+    }
+  }
+
+  static bool _looksLikeHtml(String text) {
+    final lower = text.trimLeft().toLowerCase();
+    return lower.startsWith('<!doctype html') ||
+        lower.startsWith('<html') ||
+        lower.contains('<title>cloudflare');
   }
 
   static List<Customer> _applyCustomerChanges(

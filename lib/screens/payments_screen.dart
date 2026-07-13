@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -998,13 +999,15 @@ class _PaymentsScreenState extends State<PaymentsScreen>
         bankMode: f.type == PaymentType.bank ? (f.bankMode) : null,
         note: f.note.text.trim().isEmpty ? null : f.note.text.trim(),
       );
-      final queuedForLaptop = await _deliverMobilePayment(payment);
+      final sendToLaptop = widget.mobileUser?.role == UserRole.admin;
+      if (sendToLaptop) {
+        await MobileAccessStore.queueOutgoingPayment(payment);
+        unawaited(_deliverMobilePayment(payment));
+      }
       if (!mounted) return;
       showOk(
         context,
-        queuedForLaptop
-            ? 'Payment saved on mobile and queued for laptop.'
-            : 'Payment saved',
+        sendToLaptop ? 'Payment saved. Sending to laptop...' : 'Payment saved',
       );
       setState(() {
         f.clear();

@@ -104,6 +104,7 @@ class MobileDevice {
   final String label;
   final String platform;
   final String userId;
+  final String? pushToken;
   final bool trusted;
   final String createdAt;
   final String? lastSeenAt;
@@ -113,6 +114,7 @@ class MobileDevice {
     required this.label,
     required this.platform,
     required this.userId,
+    this.pushToken,
     this.trusted = true,
     required this.createdAt,
     this.lastSeenAt,
@@ -123,6 +125,7 @@ class MobileDevice {
     String? label,
     String? platform,
     String? userId,
+    String? pushToken,
     bool? trusted,
     String? createdAt,
     String? lastSeenAt,
@@ -132,6 +135,7 @@ class MobileDevice {
       label: label ?? this.label,
       platform: platform ?? this.platform,
       userId: userId ?? this.userId,
+      pushToken: pushToken ?? this.pushToken,
       trusted: trusted ?? this.trusted,
       createdAt: createdAt ?? this.createdAt,
       lastSeenAt: lastSeenAt ?? this.lastSeenAt,
@@ -143,6 +147,7 @@ class MobileDevice {
         'label': label,
         'platform': platform,
         'userId': userId,
+        'pushToken': pushToken,
         'trusted': trusted,
         'createdAt': createdAt,
         'lastSeenAt': lastSeenAt,
@@ -153,6 +158,9 @@ class MobileDevice {
         label: (json['label'] ?? '').toString(),
         platform: (json['platform'] ?? '').toString(),
         userId: (json['userId'] ?? '').toString(),
+        pushToken: (json['pushToken'] ?? '').toString().trim().isEmpty
+            ? null
+            : (json['pushToken'] ?? '').toString().trim(),
         trusted: json['trusted'] is bool ? json['trusted'] as bool : true,
         createdAt: (json['createdAt'] ?? '').toString(),
         lastSeenAt: (json['lastSeenAt'] ?? '').toString().trim().isEmpty
@@ -213,258 +221,6 @@ class MobileUserLocation {
         sharingEnabled: json['sharingEnabled'] is bool
             ? json['sharingEnabled'] as bool
             : true,
-      );
-}
-
-class PendingInvoiceLine {
-  final String typeLabel;
-  final String brand;
-  final int qty;
-  final double rate;
-
-  const PendingInvoiceLine({
-    required this.typeLabel,
-    this.brand = '',
-    this.qty = 0,
-    this.rate = 0,
-  });
-
-  double get amount => qty * rate;
-
-  Map<String, dynamic> toJson() => {
-        'type': typeLabel,
-        'brand': brand,
-        'qty': qty,
-        'rate': rate,
-        'amount': amount,
-      };
-
-  static PendingInvoiceLine fromJson(Map<String, dynamic> json) =>
-      PendingInvoiceLine(
-        typeLabel: (json['type'] ?? '').toString(),
-        brand: (json['brand'] ?? '').toString(),
-        qty: (json['qty'] as num?)?.toInt() ?? 0,
-        rate: (json['rate'] as num?)?.toDouble() ?? 0,
-      );
-}
-
-enum PendingInvoiceStatus { pending, approved, rejected }
-
-PendingInvoiceStatus pendingInvoiceStatusFromString(String value) {
-  switch (value.trim().toLowerCase()) {
-    case 'approved':
-      return PendingInvoiceStatus.approved;
-    case 'rejected':
-      return PendingInvoiceStatus.rejected;
-    case 'pending':
-    default:
-      return PendingInvoiceStatus.pending;
-  }
-}
-
-String pendingInvoiceStatusLabel(PendingInvoiceStatus status) {
-  switch (status) {
-    case PendingInvoiceStatus.pending:
-      return 'Pending';
-    case PendingInvoiceStatus.approved:
-      return 'Approved';
-    case PendingInvoiceStatus.rejected:
-      return 'Rejected';
-  }
-}
-
-class PendingInvoice {
-  final String id;
-  final String draftCode;
-  final String submittedAt;
-  final String invoiceDate;
-  final String submittedByUserId;
-  final String submittedByName;
-  final String sourceDeviceId;
-  final String customerId;
-  final String customer;
-  final String customerDisplay;
-  final String contact;
-  final String address;
-  final String site;
-  final List<PendingInvoiceLine> lines;
-  final double cartage;
-  final PendingInvoiceStatus status;
-  final bool deliveryPending;
-  final int submitAttempts;
-  final String? lastSubmitAttemptAt;
-  final String? lastSubmitError;
-  final String? deliveredToLaptopAt;
-  final String? reviewNote;
-  final int? approvedInvoiceNo;
-  final String? reviewedAt;
-
-  const PendingInvoice({
-    required this.id,
-    required this.draftCode,
-    required this.submittedAt,
-    required this.invoiceDate,
-    required this.submittedByUserId,
-    required this.submittedByName,
-    required this.sourceDeviceId,
-    required this.customerId,
-    required this.customer,
-    this.customerDisplay = '',
-    required this.contact,
-    required this.address,
-    required this.site,
-    required this.lines,
-    this.cartage = 0,
-    this.status = PendingInvoiceStatus.pending,
-    this.deliveryPending = false,
-    this.submitAttempts = 0,
-    this.lastSubmitAttemptAt,
-    this.lastSubmitError,
-    this.deliveredToLaptopAt,
-    this.reviewNote,
-    this.approvedInvoiceNo,
-    this.reviewedAt,
-  });
-
-  double get total =>
-      lines.fold<double>(0, (sum, line) => sum + (line.qty * line.rate));
-
-  double get balance => (total + cartage).clamp(0, double.infinity);
-
-  PendingInvoice copyWith({
-    String? id,
-    String? draftCode,
-    String? submittedAt,
-    String? invoiceDate,
-    String? submittedByUserId,
-    String? submittedByName,
-    String? sourceDeviceId,
-    String? customerId,
-    String? customer,
-    String? customerDisplay,
-    String? contact,
-    String? address,
-    String? site,
-    List<PendingInvoiceLine>? lines,
-    double? cartage,
-    PendingInvoiceStatus? status,
-    bool? deliveryPending,
-    int? submitAttempts,
-    String? lastSubmitAttemptAt,
-    String? lastSubmitError,
-    String? deliveredToLaptopAt,
-    bool clearLastSubmitError = false,
-    bool clearDeliveredToLaptopAt = false,
-    String? reviewNote,
-    int? approvedInvoiceNo,
-    bool clearApprovedInvoiceNo = false,
-    String? reviewedAt,
-  }) {
-    return PendingInvoice(
-      id: id ?? this.id,
-      draftCode: draftCode ?? this.draftCode,
-      submittedAt: submittedAt ?? this.submittedAt,
-      invoiceDate: invoiceDate ?? this.invoiceDate,
-      submittedByUserId: submittedByUserId ?? this.submittedByUserId,
-      submittedByName: submittedByName ?? this.submittedByName,
-      sourceDeviceId: sourceDeviceId ?? this.sourceDeviceId,
-      customerId: customerId ?? this.customerId,
-      customer: customer ?? this.customer,
-      customerDisplay: customerDisplay ?? this.customerDisplay,
-      contact: contact ?? this.contact,
-      address: address ?? this.address,
-      site: site ?? this.site,
-      lines: lines ?? this.lines,
-      cartage: cartage ?? this.cartage,
-      status: status ?? this.status,
-      deliveryPending: deliveryPending ?? this.deliveryPending,
-      submitAttempts: submitAttempts ?? this.submitAttempts,
-      lastSubmitAttemptAt: lastSubmitAttemptAt ?? this.lastSubmitAttemptAt,
-      lastSubmitError: clearLastSubmitError
-          ? null
-          : (lastSubmitError ?? this.lastSubmitError),
-      deliveredToLaptopAt: clearDeliveredToLaptopAt
-          ? null
-          : (deliveredToLaptopAt ?? this.deliveredToLaptopAt),
-      reviewNote: reviewNote ?? this.reviewNote,
-      approvedInvoiceNo: clearApprovedInvoiceNo
-          ? null
-          : (approvedInvoiceNo ?? this.approvedInvoiceNo),
-      reviewedAt: reviewedAt ?? this.reviewedAt,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'draftCode': draftCode,
-        'submittedAt': submittedAt,
-        'invoiceDate': invoiceDate,
-        'submittedByUserId': submittedByUserId,
-        'submittedByName': submittedByName,
-        'sourceDeviceId': sourceDeviceId,
-        'customerId': customerId,
-        'customer': customer,
-        'customerDisplay': customerDisplay,
-        'contact': contact,
-        'address': address,
-        'site': site,
-        'lines': lines.map((e) => e.toJson()).toList(),
-        'cartage': cartage,
-        'status': status.name,
-        'deliveryPending': deliveryPending,
-        'submitAttempts': submitAttempts,
-        'lastSubmitAttemptAt': lastSubmitAttemptAt,
-        'lastSubmitError': lastSubmitError,
-        'deliveredToLaptopAt': deliveredToLaptopAt,
-        'reviewNote': reviewNote,
-        'approvedInvoiceNo': approvedInvoiceNo,
-        'reviewedAt': reviewedAt,
-      };
-
-  static PendingInvoice fromJson(Map<String, dynamic> json) => PendingInvoice(
-        id: (json['id'] ?? '').toString(),
-        draftCode: (json['draftCode'] ?? '').toString(),
-        submittedAt: (json['submittedAt'] ?? '').toString(),
-        invoiceDate: (json['invoiceDate'] ?? '').toString(),
-        submittedByUserId: (json['submittedByUserId'] ?? '').toString(),
-        submittedByName: (json['submittedByName'] ?? '').toString(),
-        sourceDeviceId: (json['sourceDeviceId'] ?? '').toString(),
-        customerId: (json['customerId'] ?? '').toString(),
-        customer: (json['customer'] ?? '').toString(),
-        customerDisplay:
-            ((json['customerDisplay'] ?? json['customer']) ?? '').toString(),
-        contact: (json['contact'] ?? '').toString(),
-        address: (json['address'] ?? '').toString(),
-        site: (json['site'] ?? '').toString(),
-        lines: ((json['lines'] as List?) ?? const [])
-            .map((e) => PendingInvoiceLine.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        cartage: (json['cartage'] as num?)?.toDouble() ?? 0,
-        status:
-            pendingInvoiceStatusFromString((json['status'] ?? '').toString()),
-        deliveryPending: json['deliveryPending'] is bool
-            ? json['deliveryPending'] as bool
-            : false,
-        submitAttempts: (json['submitAttempts'] as num?)?.toInt() ?? 0,
-        lastSubmitAttemptAt:
-            (json['lastSubmitAttemptAt'] ?? '').toString().trim().isEmpty
-                ? null
-                : (json['lastSubmitAttemptAt'] ?? '').toString(),
-        lastSubmitError:
-            (json['lastSubmitError'] ?? '').toString().trim().isEmpty
-                ? null
-                : (json['lastSubmitError'] ?? '').toString(),
-        deliveredToLaptopAt:
-            (json['deliveredToLaptopAt'] ?? '').toString().trim().isEmpty
-                ? null
-                : (json['deliveredToLaptopAt'] ?? '').toString(),
-        reviewNote: (json['reviewNote'] ?? '').toString().trim().isEmpty
-            ? null
-            : (json['reviewNote'] ?? '').toString(),
-        approvedInvoiceNo: (json['approvedInvoiceNo'] as num?)?.toInt(),
-        reviewedAt: (json['reviewedAt'] ?? '').toString().trim().isEmpty
-            ? null
-            : (json['reviewedAt'] ?? '').toString(),
       );
 }
 

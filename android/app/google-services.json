@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "566736700820",
+    "project_id": "quickbill-ec60f",
+    "storage_bucket": "quickbill-ec60f.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:566736700820:android:bad3eec959a454f97cbb81",
+        "android_client_info": {
+          "package_name": "com.abdullah.quickbill"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAiIjHavB-mTP6fkyOKTbRk47QQHkRRylw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

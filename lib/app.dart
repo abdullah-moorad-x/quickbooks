@@ -20,6 +20,7 @@ import 'screens/surjani_ledger_screen.dart';
 import 'screens/godown_hisaab_screen.dart';
 import 'screens/mobile_access_screen.dart';
 import 'screens/mobile_shell.dart';
+import 'screens/stats_screen.dart';
 
 class App extends StatelessWidget {
   const App({super.key});
@@ -167,6 +168,7 @@ class _HomeState extends State<Home> {
       SurjaniLedgerScreen(),
       GodownHisaabScreen(),
       MobileAccessScreen(),
+      StatsScreen(),
     ];
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -192,8 +194,10 @@ class _HomeState extends State<Home> {
         return 'Surjani, Factory, and custom ledgers';
       case 7:
         return 'Godown opening stock and daily remaining bags';
-      default:
+      case 8:
         return 'Mobile roles, locations, and sync activity';
+      default:
+        return 'Sales, payments, returns, customers, and stock stats';
     }
   }
 
@@ -416,6 +420,8 @@ class _HomeState extends State<Home> {
           BottomNavigationBarItem(
               icon: Icon(Icons.phonelink_setup_outlined),
               label: 'Mobile Access'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.insights_outlined), label: 'Stats'),
         ],
       ),
     );

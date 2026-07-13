@@ -23,6 +23,7 @@ void main() async {
     });
   }
   await NotificationService.initialize();
+  await NotificationService.initializePushMessaging();
   await DesktopRuntimeController.instance.initialize();
 
   runApp(const App());

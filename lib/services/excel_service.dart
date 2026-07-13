@@ -224,7 +224,7 @@ void _ensureDefaultSheetRenamed(Excel excel, String newName) {
 }
 
 List<String> excelDisplayTriple(List<ItemLine> lines, String type) {
-  final same = lines.where((l) => l.typeLabel == type && l.qty > 0).toList();
+  final same = lines.where((l) => l.typeLabel == type && l.qty != 0).toList();
   if (same.isEmpty) return ['', '0', '0'];
   final brands = <String>[];
   final qtys = <String>[];
@@ -241,7 +241,8 @@ List<String> excelDisplayTriple(List<ItemLine> lines, String type) {
 String saleShortSummary(Invoice inv) {
   final parts = <String>[];
   for (final t in kItemTypes) {
-    final same = inv.lines.where((l) => l.typeLabel == t && l.qty > 0).toList();
+    final same =
+        inv.lines.where((l) => l.typeLabel == t && l.qty != 0).toList();
     if (same.isEmpty) continue;
     int qty = 0;
     double amt = 0.0;
@@ -249,7 +250,7 @@ String saleShortSummary(Invoice inv) {
       qty += l.qty;
       amt += l.qty * l.rate;
     }
-    final rate = qty > 0 ? amt / qty : 0.0;
+    final rate = qty != 0 ? amt / qty : 0.0;
     parts.add('$t $qty ${fmt0(rate)}');
   }
   return parts.join(' | ');
@@ -853,12 +854,12 @@ Future<File> exportDailyLedger(DateTime day) async {
       if (d.year == day.year && d.month == day.month && d.day == day.day) {
         rows.add(_LedgerRow(
           date: d,
-          type: 'Sale',
+          type: _invoiceLedgerType(inv),
           customer: inv.customer,
-          ref: 'Invoice ${inv.sNo}',
+          ref: _invoiceLedgerRef(inv),
           note: _saleNote(inv),
-          debit: inv.balance,
-          credit: 0.0,
+          debit: _invoiceLedgerDebit(inv),
+          credit: _invoiceLedgerCredit(inv),
         ));
       }
     } catch (_) {}
@@ -896,12 +897,12 @@ Future<File> exportMonthlyLedger([DateTime? month]) async {
       if (d.year == base.year && d.month == base.month) {
         rows.add(_LedgerRow(
           date: d,
-          type: 'Sale',
+          type: _invoiceLedgerType(inv),
           customer: inv.customer,
-          ref: 'Invoice ${inv.sNo}',
+          ref: _invoiceLedgerRef(inv),
           note: _saleNote(inv),
-          debit: inv.balance,
-          credit: 0.0,
+          debit: _invoiceLedgerDebit(inv),
+          credit: _invoiceLedgerCredit(inv),
         ));
       }
     } catch (_) {}
@@ -1226,11 +1227,11 @@ Future<File> exportCustomerLedger(String key) async {
   for (final inv in invs) {
     rows.add({
       'date': parseInvoiceDate(inv.date),
-      'type': 'Sale',
-      'ref': 'Invoice ${inv.sNo}',
+      'type': _invoiceLedgerType(inv),
+      'ref': _invoiceLedgerRef(inv),
       'note': _saleNote(inv),
-      'debit': inv.balance,
-      'credit': 0.0,
+      'debit': _invoiceLedgerDebit(inv),
+      'credit': _invoiceLedgerCredit(inv),
     });
   }
   for (final p in pays) {
@@ -1285,14 +1286,37 @@ String _ledgerNoteForPayment(PaymentEntry e) {
   return '${paymentTypeLabel(e.type)} - ${parts.join(' / ')}';
 }
 
+String _invoiceLedgerType(Invoice inv) => inv.isReturn ? 'Return' : 'Sale';
+
+String _invoiceLedgerRef(Invoice inv) {
+  if (!inv.isReturn) return 'Invoice ${inv.sNo}';
+  final original = inv.returnOfInvoiceNo;
+  if (original == null) return 'Return ${inv.sNo}';
+  return 'Return ${inv.sNo} of Invoice $original';
+}
+
+double _invoiceLedgerDebit(Invoice inv) {
+  final balance = inv.balance;
+  return balance > 0 ? balance : 0.0;
+}
+
+double _invoiceLedgerCredit(Invoice inv) {
+  final balance = inv.balance;
+  return balance < 0 ? -balance : 0.0;
+}
+
 String _saleNote(Invoice inv) {
   final items = <String>[];
   for (final line in inv.lines) {
-    if (line.qty > 0) {
+    if (line.qty != 0) {
       items.add('${line.typeLabel} ${line.qty}');
     }
   }
   final parts = <String>[];
+  if (inv.isReturn) {
+    final original = inv.returnOfInvoiceNo;
+    parts.add(original == null ? 'Return' : 'Return of invoice $original');
+  }
   if (items.isNotEmpty) parts.add('Items: ${items.join(', ')}');
   final addr = inv.address.trim();
   if (addr.isNotEmpty) parts.add('Address: $addr');

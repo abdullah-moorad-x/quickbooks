@@ -9,6 +9,7 @@ import '../models/mobile_access.dart';
 import '../models/payment.dart';
 import '../utils/date.dart';
 import 'excel_service.dart';
+import 'firebase_push_sender.dart';
 import 'godown_stock_store.dart';
 import 'mobile_sync_store.dart';
 import 'notification_service.dart';
@@ -112,6 +113,54 @@ class LocalApiServer {
             'role': user.role.name,
           },
         });
+      }
+      if (request.method == 'POST' && path == '/push-tokens') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        final body = await utf8.decodeStream(request);
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid JSON body.'},
+          );
+        }
+        final pushToken = (decoded['token'] ?? '').toString().trim();
+        final deviceId = (decoded['deviceId'] ?? '').toString().trim();
+        final platform = (decoded['platform'] ?? 'Android').toString().trim();
+        if (pushToken.isEmpty || deviceId.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Push token and device ID are required.'},
+          );
+        }
+        final now = DateTime.now().toIso8601String();
+        final devices = await MobileAccessStore.loadDevices();
+        devices.removeWhere(
+          (device) => device.id == deviceId || device.pushToken == pushToken,
+        );
+        devices.add(
+          MobileDevice(
+            id: deviceId,
+            label: '${user.displayName} phone',
+            platform: platform,
+            userId: user.id,
+            pushToken: pushToken,
+            trusted: true,
+            createdAt: now,
+            lastSeenAt: now,
+          ),
+        );
+        await MobileAccessStore.saveDevices(devices);
+        return _writeJson(request, HttpStatus.ok, {'ok': true});
       }
       if (request.method == 'GET' && path == '/sync/read-only') {
         final user = await _authorizedUser(request);
@@ -824,6 +873,10 @@ class LocalApiServer {
         await MobileAccessStore.upsertOrder(order);
         if (statusChanged && order.status != MobileOrderStatus.pending) {
           unawaited(NotificationService.showOrderStatusChanged(order));
+          unawaited(FirebasePushSender.sendOrderStatusChanged(
+            order,
+            excludeUserId: user.id,
+          ));
         }
         unawaited(_syncOrderInvoiceAndSave(
           order,
@@ -1170,9 +1223,17 @@ class LocalApiServer {
           statusUpdatedByName: statusChanged ? user.displayName : null,
         );
         if (isNewOrder) {
-          await NotificationService.showNewOrder(order);
+          unawaited(NotificationService.showNewOrder(order));
+          unawaited(FirebasePushSender.sendNewOrder(
+            order,
+            excludeUserId: user.id,
+          ));
         } else if (statusChanged && order.status != MobileOrderStatus.pending) {
-          await NotificationService.showOrderStatusChanged(order);
+          unawaited(NotificationService.showOrderStatusChanged(order));
+          unawaited(FirebasePushSender.sendOrderStatusChanged(
+            order,
+            excludeUserId: user.id,
+          ));
         }
         order = await _syncDeliveredOrderInvoice(
           order,
@@ -1197,7 +1258,7 @@ class LocalApiServer {
           'order': order.toJson(),
         });
       }
-      if (request.method == 'POST' && path == '/pending-invoices') {
+      if (request.method == 'POST' && path == '/invoice-returns') {
         final user = await _authorizedUser(request);
         if (user == null) {
           return _writeJson(
@@ -1210,7 +1271,7 @@ class LocalApiServer {
           return _writeJson(
             request,
             HttpStatus.forbidden,
-            {'error': 'Viewer accounts cannot create draft invoices.'},
+            {'error': 'Viewer accounts cannot record returns.'},
           );
         }
         final body = await utf8.decodeStream(request);
@@ -1222,73 +1283,433 @@ class LocalApiServer {
             {'error': 'Invalid JSON body.'},
           );
         }
+        final requestId = (decoded['requestId'] ?? '').toString().trim();
+        final sourceInvoiceNo = (decoded['sourceInvoiceNo'] as num?)?.toInt() ??
+            int.tryParse((decoded['sourceInvoiceNo'] ?? '').toString()) ??
+            0;
+        if (requestId.isEmpty || sourceInvoiceNo <= 0) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Return request ID and source invoice are required.'},
+          );
+        }
+        final DateTime returnDate;
+        try {
+          returnDate = parseInvoiceDate(
+            (decoded['returnDate'] ?? '').toString(),
+          );
+        } catch (_) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Valid return date is required.'},
+          );
+        }
+        final requested = <String, int>{};
+        String lineKey(String type, String brand) =>
+            '${type.trim().toLowerCase()}|${brand.trim().toLowerCase()}';
+        for (final raw in (decoded['lines'] as List?) ?? const []) {
+          if (raw is! Map<String, dynamic>) continue;
+          final type = (raw['type'] ?? '').toString().trim();
+          final brand = (raw['brand'] ?? '').toString().trim();
+          final qty = (raw['qty'] as num?)?.toInt() ??
+              int.tryParse((raw['qty'] ?? '').toString()) ??
+              0;
+          if (type.isEmpty || qty <= 0) continue;
+          final key = lineKey(type, brand);
+          requested[key] = (requested[key] ?? 0) + qty;
+        }
+        if (requested.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'At least one returned quantity is required.'},
+          );
+        }
+
+        final savedReturn = await _withOrderInvoiceLock(() async {
+          final invoices = await Store.loadAll();
+          final alreadySaved = invoices.cast<Invoice?>().firstWhere(
+                (invoice) =>
+                    invoice != null && invoice.sourceReturnId == requestId,
+                orElse: () => null,
+              );
+          if (alreadySaved != null) return alreadySaved;
+          final source = invoices.cast<Invoice?>().firstWhere(
+                (invoice) =>
+                    invoice != null &&
+                    invoice.sNo == sourceInvoiceNo &&
+                    !invoice.isReturn,
+                orElse: () => null,
+              );
+          if (source == null) {
+            throw const FormatException(
+              'Original invoice was not found on the laptop. Sync and try again.',
+            );
+          }
+          final available = <String, int>{};
+          final sourceAmount = <String, double>{};
+          final sourceLine = <String, ItemLine>{};
+          for (final line in source.lines.where((line) => line.qty > 0)) {
+            final key = lineKey(line.typeLabel, line.brand);
+            available[key] = (available[key] ?? 0) + line.qty;
+            sourceAmount[key] =
+                (sourceAmount[key] ?? 0) + (line.qty * line.rate);
+            sourceLine.putIfAbsent(key, () => line);
+          }
+          for (final previous in invoices.where(
+            (invoice) =>
+                invoice.isReturn &&
+                invoice.returnOfInvoiceNo == sourceInvoiceNo,
+          )) {
+            for (final line in previous.lines.where((line) => line.qty < 0)) {
+              final key = lineKey(line.typeLabel, line.brand);
+              available[key] = (available[key] ?? 0) + line.qty;
+            }
+          }
+          final returnLines = <ItemLine>[];
+          for (final entry in requested.entries) {
+            final remaining = available[entry.key] ?? 0;
+            if (entry.value > remaining) {
+              final original = sourceLine[entry.key];
+              final label = original == null
+                  ? entry.key
+                  : '${original.typeLabel} ${original.brand}'.trim();
+              throw FormatException(
+                'Only $remaining $label can still be returned.',
+              );
+            }
+            final original = sourceLine[entry.key]!;
+            final originalQty = source.lines
+                .where((line) =>
+                    line.qty > 0 &&
+                    lineKey(line.typeLabel, line.brand) == entry.key)
+                .fold<int>(0, (sum, line) => sum + line.qty);
+            final rate = originalQty <= 0
+                ? original.rate
+                : (sourceAmount[entry.key] ?? 0) / originalQty;
+            returnLines.add(ItemLine(
+              original.typeLabel,
+              brand: original.brand,
+              qty: -entry.value,
+              rate: rate,
+            ));
+          }
+          final returnInvoice = Invoice(
+            sNo: await Store.nextSerial(),
+            date: formatInvoiceDate(returnDate),
+            customer: source.customer,
+            customerDisplay: source.customerDisplay,
+            customerId: source.customerId,
+            contact: source.contact,
+            address: source.address,
+            site: source.site,
+            lines: returnLines,
+            isReturn: true,
+            returnOfInvoiceNo: source.sNo,
+            sourceReturnId: requestId,
+          );
+          await Store.upsertInvoice(returnInvoice);
+          await syncInvoicesPaidFromPayments();
+          return returnInvoice;
+        });
+        queueInvoiceReportRefresh(
+          dates: {returnDate},
+          months: {returnDate},
+          customerKeys: {savedReturn.customerId, savedReturn.customer},
+        );
+        await MobileAccessStore.addSyncLog(
+          SyncLogEntry(
+            id: MobileAccessStore.nextSyncLogId(),
+            createdAt: DateTime.now().toIso8601String(),
+            direction: SyncLogDirection.incoming,
+            status: SyncLogStatus.success,
+            entityType: 'invoice_return',
+            entityId: '${savedReturn.sNo}',
+            summary: 'Recorded mobile return #${savedReturn.sNo}',
+            details: 'Invoice #$sourceInvoiceNo - ${user.username}',
+          ),
+        );
+        return _writeJson(request, HttpStatus.ok, {
+          'ok': true,
+          'invoice': savedReturn.toJson(),
+        });
+      }
+      if (request.method == 'DELETE' &&
+          request.uri.pathSegments.length == 2 &&
+          request.uri.pathSegments.first == 'invoice-returns') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        if (user.role == UserRole.viewer) {
+          return _writeJson(
+            request,
+            HttpStatus.forbidden,
+            {'error': 'Viewer accounts cannot delete returns.'},
+          );
+        }
+        final invoiceNo = int.tryParse(request.uri.pathSegments[1].trim()) ?? 0;
+        final invoices = await Store.loadAll();
+        final existing = invoices.cast<Invoice?>().firstWhere(
+              (invoice) => invoice != null && invoice.sNo == invoiceNo,
+              orElse: () => null,
+            );
+        if (existing == null) {
+          return _writeJson(request, HttpStatus.ok, {
+            'ok': true,
+            'removed': false,
+            'invoiceNo': invoiceNo,
+          });
+        }
+        if (!existing.isReturn) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Only return entries can be deleted from this route.'},
+          );
+        }
+        final removed = await Store.deleteInvoice(invoiceNo);
+        await syncInvoicesPaidFromPayments();
+        DateTime? removedDate;
+        try {
+          removedDate = parseInvoiceDate(existing.date);
+        } catch (_) {}
+        if (removedDate != null) {
+          queueInvoiceReportRefresh(
+            dates: {removedDate},
+            months: {removedDate},
+            customerKeys: {existing.customerId, existing.customer},
+          );
+        }
+        await MobileAccessStore.addSyncLog(
+          SyncLogEntry(
+            id: MobileAccessStore.nextSyncLogId(),
+            createdAt: DateTime.now().toIso8601String(),
+            direction: SyncLogDirection.incoming,
+            status: SyncLogStatus.success,
+            entityType: 'invoice_return',
+            entityId: '$invoiceNo',
+            summary: 'Deleted mobile return #$invoiceNo',
+            details: user.username,
+          ),
+        );
+        return _writeJson(request, HttpStatus.ok, {
+          'ok': true,
+          'removed': removed != null,
+          'invoiceNo': invoiceNo,
+        });
+      }
+      if (request.method == 'POST' && path == '/walk-in-invoices') {
+        final user = await _authorizedUser(request);
+        if (user == null) {
+          return _writeJson(
+            request,
+            HttpStatus.unauthorized,
+            {'error': 'Unauthorized.'},
+          );
+        }
+        if (user.role == UserRole.viewer) {
+          return _writeJson(
+            request,
+            HttpStatus.forbidden,
+            {'error': 'Viewer accounts cannot create walk-in sales.'},
+          );
+        }
+        final body = await utf8.decodeStream(request);
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Invalid JSON body.'},
+          );
+        }
+        final orderId = (decoded['orderId'] ?? '').toString().trim();
+        if (orderId.isEmpty) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Walk-in sale ID is required.'},
+          );
+        }
+        DateTime invoiceDate;
+        try {
+          invoiceDate = parseInvoiceDate(
+            (decoded['invoiceDate'] ?? '').toString(),
+          );
+        } catch (_) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Valid invoice date is required.'},
+          );
+        }
         final lines = ((decoded['lines'] as List?) ?? const [])
-            .map((e) => PendingInvoiceLine.fromJson(e as Map<String, dynamic>))
-            .where((line) => line.qty > 0 && line.typeLabel.trim().isNotEmpty)
+            .whereType<Map<String, dynamic>>()
+            .map(
+              (e) => ItemLine(
+                (e['typeLabel'] ?? e['type'] ?? '').toString(),
+                brand: (e['brand'] ?? '').toString(),
+                qty: (e['qty'] as num?)?.toInt() ?? 0,
+                rate: (e['rate'] as num?)?.toDouble() ?? 0,
+              ),
+            )
+            .where((line) =>
+                line.qty > 0 &&
+                line.rate > 0 &&
+                line.typeLabel.trim().isNotEmpty)
             .toList();
         if (lines.isEmpty) {
           return _writeJson(
             request,
             HttpStatus.badRequest,
-            {'error': 'At least one valid line item is required.'},
+            {'error': 'At least one item with quantity and rate is required.'},
           );
         }
-        final now = DateTime.now().toIso8601String();
-        final draftCode = (decoded['draftCode'] ?? '').toString().trim().isEmpty
-            ? 'TMP-MOB-${DateTime.now().microsecondsSinceEpoch}'
-            : (decoded['draftCode'] ?? '').toString().trim();
-        final existing = (await MobileAccessStore.loadPendingInvoices())
-            .cast<PendingInvoice?>()
-            .firstWhere(
-              (invoice) =>
-                  invoice != null &&
-                  (invoice.id == draftCode || invoice.draftCode == draftCode),
-              orElse: () => null,
-            );
-        if (existing != null) {
-          return _writeJson(request, HttpStatus.ok, {
-            'ok': true,
-            'draftCode': existing.draftCode,
-            'status': existing.status.name,
-            'duplicate': true,
-          });
+        final cartage = (decoded['cartage'] as num?)?.toDouble() ??
+            double.tryParse((decoded['cartage'] ?? '').toString()) ??
+            0.0;
+        if (cartage < 0) {
+          return _writeJson(
+            request,
+            HttpStatus.badRequest,
+            {'error': 'Cartage cannot be negative.'},
+          );
         }
-        final pending = PendingInvoice(
-          id: draftCode,
-          draftCode: draftCode,
-          submittedAt: now,
-          invoiceDate: (decoded['invoiceDate'] ?? '').toString(),
-          submittedByUserId: user.id,
-          submittedByName: user.displayName,
-          sourceDeviceId: (decoded['deviceId'] ?? '').toString(),
-          customerId: (decoded['customerId'] ?? '').toString(),
-          customer: (decoded['customer'] ?? '').toString(),
-          customerDisplay:
-              ((decoded['customerDisplay'] ?? decoded['customer']) ?? '')
-                  .toString(),
-          contact: (decoded['contact'] ?? '').toString(),
-          address: (decoded['address'] ?? '').toString(),
-          site: (decoded['site'] ?? '').toString(),
-          lines: lines,
-          cartage: (decoded['cartage'] as num?)?.toDouble() ?? 0,
+        final customerName =
+            (decoded['customer'] ?? '').toString().trim().isEmpty
+                ? 'Walk-in Customer'
+                : (decoded['customer'] ?? '').toString().trim();
+        final paymentType = paymentTypeFromString(
+            (decoded['paymentType'] ?? 'Cash').toString());
+        final site =
+            (decoded['site'] ?? kShipmentSites.first).toString().trim();
+        final paymentNote = (decoded['paymentNote'] ?? '').toString().trim();
+        late Invoice invoice;
+        late MobileOrder walkInOrder;
+        await _withOrderInvoiceLock(() async {
+          final invoices = await Store.loadAll();
+          final linkedInvoice = invoices.cast<Invoice?>().firstWhere(
+                (item) =>
+                    item != null &&
+                    item.walkIn &&
+                    item.sourceOrderId == orderId,
+                orElse: () => null,
+              );
+          if (linkedInvoice != null) {
+            invoice = linkedInvoice;
+          } else {
+            invoice = Invoice(
+              sNo: await Store.nextSerial(),
+              date: formatInvoiceDate(invoiceDate),
+              customer: customerName,
+              customerDisplay: customerName,
+              customerId: customerName,
+              contact: (decoded['contact'] ?? '').toString().trim(),
+              address: (decoded['address'] ?? '').toString().trim(),
+              site: site,
+              lines: lines
+                  .map((line) => ItemLine(
+                        line.typeLabel,
+                        brand: line.brand,
+                        qty: line.qty,
+                        rate: line.rate,
+                      ))
+                  .toList(),
+              cartage: cartage,
+              walkIn: true,
+              sourceOrderId: orderId,
+              walkInPaymentType: paymentType,
+              walkInPaymentNote: paymentNote.isEmpty ? null : paymentNote,
+              walkInBank: (paymentType == PaymentType.cheque ||
+                          paymentType == PaymentType.bank) &&
+                      (decoded['bank'] ?? '').toString().trim().isNotEmpty
+                  ? (decoded['bank'] ?? '').toString().trim()
+                  : null,
+              walkInChequeNo: paymentType == PaymentType.cheque &&
+                      (decoded['chequeNo'] ?? '').toString().trim().isNotEmpty
+                  ? (decoded['chequeNo'] ?? '').toString().trim()
+                  : null,
+              walkInTxnId: paymentType == PaymentType.bank &&
+                      (decoded['txnId'] ?? '').toString().trim().isNotEmpty
+                  ? (decoded['txnId'] ?? '').toString().trim()
+                  : null,
+              walkInBankMode: paymentType == PaymentType.bank
+                  ? (decoded['bankMode'] ?? 'Deposit').toString()
+                  : null,
+            );
+            invoice.paid = invoice.balance;
+            await Store.upsertInvoice(invoice);
+          }
+
+          final now = DateTime.now().toIso8601String();
+          final existingOrders = await MobileAccessStore.loadOrders();
+          final existingOrder = existingOrders.cast<MobileOrder?>().firstWhere(
+                (item) => item != null && item.id == orderId,
+                orElse: () => null,
+              );
+          final brands = lines
+              .map((line) => line.brand.trim())
+              .where((brand) => brand.isNotEmpty)
+              .toSet()
+              .join(', ');
+          final totalQty = lines.fold<int>(0, (sum, line) => sum + line.qty);
+          walkInOrder = MobileOrder(
+            id: orderId,
+            createdAt: existingOrder?.createdAt ?? now,
+            createdByUserId: existingOrder?.createdByUserId ?? user.id,
+            createdByName: existingOrder?.createdByName ?? user.displayName,
+            updatedAt: now,
+            updatedByUserId: user.id,
+            updatedByName: user.displayName,
+            orderDate: invoiceDate.toIso8601String().split('T').first,
+            customerName: customerName,
+            plotNo: 'Walk-in Sale',
+            bagsQuantity: totalQty,
+            bagsType: lines.length == 1 ? lines.first.typeLabel : 'Mixed items',
+            bagsBrand: brands,
+            orderSite: site,
+            note: paymentNote.isEmpty
+                ? 'Walk-in sale'
+                : 'Walk-in sale - $paymentNote',
+            status: MobileOrderStatus.delivered,
+            statusUpdatedAt: existingOrder?.statusUpdatedAt ?? now,
+            statusUpdatedByUserId:
+                existingOrder?.statusUpdatedByUserId ?? user.id,
+            statusUpdatedByName:
+                existingOrder?.statusUpdatedByName ?? user.displayName,
+            recordedInvoiceNo: invoice.sNo,
+            recordedInvoiceAt: existingOrder?.recordedInvoiceAt ?? now,
+          );
+          await MobileAccessStore.upsertOrder(walkInOrder);
+        });
+        queueInvoiceReportRefresh(
+          dates: {invoiceDate},
+          months: {invoiceDate},
+          customerKeys: const <String>{},
         );
-        await MobileAccessStore.upsertPendingInvoice(pending);
         await MobileAccessStore.addSyncLog(
           SyncLogEntry(
             id: MobileAccessStore.nextSyncLogId(),
-            createdAt: now,
+            createdAt: DateTime.now().toIso8601String(),
             direction: SyncLogDirection.incoming,
             status: SyncLogStatus.success,
-            entityType: 'pending_invoice',
-            entityId: pending.id,
-            summary: 'Received mobile draft ${pending.draftCode}',
-            details: '${pending.customer} - ${user.username}',
+            entityType: 'invoice',
+            entityId: '${invoice.sNo}',
+            summary: 'Recorded mobile walk-in sale #${invoice.sNo}',
+            details: '$customerName - ${user.username}',
           ),
         );
         return _writeJson(request, HttpStatus.ok, {
           'ok': true,
-          'draftCode': pending.draftCode,
-          'status': pending.status.name,
+          'invoice': invoice.toJson(),
+          'order': walkInOrder.toJson(),
         });
       }
       if (request.method == 'POST' && path == '/locations') {
@@ -1348,6 +1769,12 @@ class LocalApiServer {
         request,
         HttpStatus.notFound,
         {'error': 'Route not found.'},
+      );
+    } on FormatException catch (error) {
+      return _writeJson(
+        request,
+        HttpStatus.badRequest,
+        {'error': error.message},
       );
     } catch (e) {
       return _writeJson(
@@ -1441,40 +1868,75 @@ class LocalApiServer {
     double? overrideCartage,
   }) {
     return _withOrderInvoiceLock(() async {
-      final recordedInvoiceNo = order.recordedInvoiceNo;
+      var effectiveOrder = order;
+      final savedOrders = await MobileAccessStore.loadOrders();
+      final savedOrder = savedOrders.cast<MobileOrder?>().firstWhere(
+            (item) => item != null && item.id == order.id,
+            orElse: () => null,
+          );
+      if (effectiveOrder.recordedInvoiceNo == null &&
+          savedOrder?.recordedInvoiceNo != null) {
+        effectiveOrder = effectiveOrder.copyWith(
+          recordedInvoiceNo: savedOrder!.recordedInvoiceNo,
+          recordedInvoiceAt: savedOrder.recordedInvoiceAt,
+        );
+      }
+
+      if (effectiveOrder.recordedInvoiceNo == null) {
+        final linkedInvoice =
+            (await Store.loadAll()).cast<Invoice?>().firstWhere(
+                  (invoice) =>
+                      invoice != null && invoice.sourceOrderId == order.id,
+                  orElse: () => null,
+                );
+        if (linkedInvoice != null) {
+          effectiveOrder = effectiveOrder.copyWith(
+            recordedInvoiceNo: linkedInvoice.sNo,
+            recordedInvoiceAt: savedOrder?.recordedInvoiceAt ??
+                DateTime.now().toIso8601String(),
+          );
+          await MobileAccessStore.upsertOrder(effectiveOrder);
+        }
+      }
+
+      final recordedInvoiceNo = effectiveOrder.recordedInvoiceNo;
       if (recordedInvoiceNo != null) {
-        if (order.status != MobileOrderStatus.delivered) {
-          await _deleteRecordedOrderInvoice(order);
-          return order.copyWith(clearRecordedInvoice: true);
+        if (effectiveOrder.status != MobileOrderStatus.delivered) {
+          await _deleteRecordedOrderInvoice(effectiveOrder);
+          final cleared = effectiveOrder.copyWith(clearRecordedInvoice: true);
+          await MobileAccessStore.upsertOrder(cleared);
+          return cleared;
         }
         await _updateRecordedOrderInvoice(
-          order,
+          effectiveOrder,
           recordedInvoiceNo,
           overrideRate: overrideRate,
           overrideCartage: overrideCartage,
         );
-        return order;
+        await MobileAccessStore.upsertOrder(effectiveOrder);
+        return effectiveOrder;
       }
-      if (!createIfMissing || order.status != MobileOrderStatus.delivered) {
-        return order;
+      if (!createIfMissing ||
+          effectiveOrder.status != MobileOrderStatus.delivered) {
+        return effectiveOrder;
       }
-      final customerName = order.customerName.trim();
-      if (customerName.isEmpty) return order;
+      final customerName = effectiveOrder.customerName.trim();
+      if (customerName.isEmpty) return effectiveOrder;
 
       final customer = await _customerForDeliveredOrder(customerName);
-      if (customer == null) return order;
+      if (customer == null) return effectiveOrder;
 
       final DateTime parsedOrderDate;
       try {
-        parsedOrderDate = parseInvoiceDate(order.orderDate);
+        parsedOrderDate = parseInvoiceDate(effectiveOrder.orderDate);
       } catch (_) {
-        return order;
+        return effectiveOrder;
       }
 
       final rate = overrideRate != null && overrideRate > 0
           ? overrideRate
-          : await _latestRateForOrder(customer, order);
-      if (rate <= 0) return order;
+          : await _latestRateForOrder(customer, effectiveOrder);
+      if (rate <= 0) return effectiveOrder;
 
       final now = DateTime.now().toIso8601String();
       final invoiceDate = formatInvoiceDate(parsedOrderDate);
@@ -1488,19 +1950,20 @@ class LocalApiServer {
             : customer.displayName,
         customerId: customer.id,
         contact: customer.contact,
-        address: order.plotNo,
-        site: order.orderSite,
+        address: effectiveOrder.plotNo,
+        site: effectiveOrder.orderSite,
         lines: [
           ItemLine(
-            order.bagsType,
-            brand: order.bagsBrand,
-            qty: order.bagsQuantity,
+            effectiveOrder.bagsType,
+            brand: effectiveOrder.bagsBrand,
+            qty: effectiveOrder.bagsQuantity,
             rate: rate,
           ),
         ],
         cartage: overrideCartage ?? 0,
         paid: 0,
         walkIn: false,
+        sourceOrderId: effectiveOrder.id,
       );
       await Store.upsertInvoice(invoice);
       queueInvoiceReportRefresh(
@@ -1509,10 +1972,11 @@ class LocalApiServer {
         customerKeys: {invoice.customerId, invoice.customer},
       );
 
-      final recorded = order.copyWith(
+      final recorded = effectiveOrder.copyWith(
         recordedInvoiceNo: nextNo,
         recordedInvoiceAt: now,
       );
+      await MobileAccessStore.upsertOrder(recorded);
       await MobileAccessStore.addSyncLog(
         SyncLogEntry(
           id: MobileAccessStore.nextSyncLogId(),
@@ -1522,7 +1986,7 @@ class LocalApiServer {
           entityType: 'invoice',
           entityId: '$nextNo',
           summary: 'Auto-recorded delivered order as invoice #$nextNo',
-          details: 'Order ${order.id} - ${customer.name}',
+          details: 'Order ${effectiveOrder.id} - ${customer.name}',
         ),
       );
       return recorded;
@@ -1576,6 +2040,7 @@ class LocalApiServer {
       cartage: overrideCartage ?? existing.cartage,
       paid: existing.paid,
       walkIn: existing.walkIn,
+      sourceOrderId: existing.sourceOrderId ?? order.id,
       walkInPaymentType: existing.walkInPaymentType,
       walkInPaymentNote: existing.walkInPaymentNote,
       walkInBank: existing.walkInBank,
@@ -1679,73 +2144,5 @@ class LocalApiServer {
       }
     }
     return latestRate;
-  }
-
-  static Future<int> approvePendingInvoice(
-    PendingInvoice invoice, {
-    String? reviewNote,
-  }) async {
-    final nextNo = await Store.nextSerial();
-    final resolvedCustomerId = invoice.customerId.trim().isEmpty
-        ? invoice.customer.trim()
-        : invoice.customerId.trim();
-    final actual = Invoice(
-      sNo: nextNo,
-      date: invoice.invoiceDate,
-      customer: invoice.customer,
-      customerDisplay: invoice.customerDisplay.trim().isEmpty
-          ? invoice.customer
-          : invoice.customerDisplay,
-      customerId: resolvedCustomerId,
-      contact: invoice.contact,
-      address: invoice.address,
-      site: invoice.site,
-      lines: invoice.lines
-          .map(
-            (line) => ItemLine(
-              line.typeLabel,
-              brand: line.brand,
-              qty: line.qty,
-              rate: line.rate,
-            ),
-          )
-          .toList(),
-      cartage: invoice.cartage,
-      paid: 0,
-      walkIn: false,
-    );
-    await Store.upsertInvoice(actual);
-    if (resolvedCustomerId.isNotEmpty || invoice.customer.trim().isNotEmpty) {
-      final customerId = resolvedCustomerId.isEmpty
-          ? await CustomerStore.nextCustomerId()
-          : resolvedCustomerId;
-      await CustomerStore.addCustomer(
-        customerId,
-        invoice.customer.trim(),
-        invoice.contact.trim(),
-        displayName: invoice.customerDisplay.trim().isEmpty
-            ? invoice.customer.trim()
-            : invoice.customerDisplay.trim(),
-      );
-    }
-    await MobileAccessStore.updatePendingInvoiceStatus(
-      invoice.id,
-      PendingInvoiceStatus.approved,
-      reviewNote: reviewNote,
-      approvedInvoiceNo: nextNo,
-    );
-    await MobileAccessStore.addSyncLog(
-      SyncLogEntry(
-        id: MobileAccessStore.nextSyncLogId(),
-        createdAt: DateTime.now().toIso8601String(),
-        direction: SyncLogDirection.local,
-        status: SyncLogStatus.success,
-        entityType: 'invoice',
-        entityId: '$nextNo',
-        summary: 'Approved draft ${invoice.draftCode} as invoice #$nextNo',
-        details: reviewNote,
-      ),
-    );
-    return nextNo;
   }
 }

@@ -32,7 +32,6 @@ String _slug(String value) {
 class MobileAccessStore {
   static List<AppUser>? _usersCache;
   static List<MobileDevice>? _devicesCache;
-  static List<PendingInvoice>? _pendingInvoicesCache;
   static List<PaymentEntry>? _outgoingPaymentsCache;
   static List<String>? _outgoingPaymentDeletesCache;
   static List<MobileOrder>? _ordersCache;
@@ -130,52 +129,6 @@ class MobileAccessStore {
       jsonEncode(_devicesCache!.map((e) => e.toJson()).toList()),
     );
     AppBus.bump();
-  }
-
-  static Future<List<PendingInvoice>> loadPendingInvoices() async {
-    final cached = _pendingInvoicesCache;
-    if (cached != null) return List<PendingInvoice>.from(cached);
-    try {
-      final f = await _file('pending_invoices.json');
-      if (!await f.exists()) {
-        _pendingInvoicesCache = <PendingInvoice>[];
-        return [];
-      }
-      final raw = await _readJsonList(f);
-      final loaded = raw
-          .map((e) => PendingInvoice.fromJson(e as Map<String, dynamic>))
-          .toList()
-        ..sort((a, b) => b.submittedAt.compareTo(a.submittedAt));
-      _pendingInvoicesCache = loaded;
-      return List<PendingInvoice>.from(loaded);
-    } catch (_) {
-      _pendingInvoicesCache = <PendingInvoice>[];
-      return [];
-    }
-  }
-
-  static Future<void> savePendingInvoices(List<PendingInvoice> invoices) async {
-    final f = await _file('pending_invoices.json');
-    final sorted = List<PendingInvoice>.from(invoices)
-      ..sort((a, b) => b.submittedAt.compareTo(a.submittedAt));
-    _pendingInvoicesCache = sorted;
-    await f.writeAsString(
-      jsonEncode(_pendingInvoicesCache!.map((e) => e.toJson()).toList()),
-    );
-    AppBus.bump();
-  }
-
-  static Future<void> upsertPendingInvoice(PendingInvoice invoice) async {
-    final invoices = await loadPendingInvoices();
-    final index = invoices.indexWhere(
-      (e) => e.id == invoice.id || e.draftCode == invoice.draftCode,
-    );
-    if (index >= 0) {
-      invoices[index] = invoice;
-    } else {
-      invoices.add(invoice);
-    }
-    await savePendingInvoices(invoices);
   }
 
   static Future<List<PaymentEntry>> loadOutgoingPayments() async {
@@ -760,50 +713,6 @@ class MobileAccessStore {
     AppBus.bump();
   }
 
-  static Future<void> updatePendingInvoiceStatus(
-    String invoiceId,
-    PendingInvoiceStatus status, {
-    String? reviewNote,
-    int? approvedInvoiceNo,
-  }) async {
-    final invoices = await loadPendingInvoices();
-    final index = invoices.indexWhere((e) => e.id == invoiceId);
-    if (index < 0) return;
-    invoices[index] = invoices[index].copyWith(
-      status: status,
-      reviewNote: reviewNote,
-      approvedInvoiceNo: approvedInvoiceNo,
-      clearApprovedInvoiceNo: approvedInvoiceNo == null,
-      reviewedAt: _nowIso(),
-    );
-    await savePendingInvoices(invoices);
-  }
-
-  static Future<void> updatePendingInvoiceDelivery(
-    String invoiceId, {
-    required bool deliveryPending,
-    int? submitAttempts,
-    String? lastSubmitAttemptAt,
-    String? lastSubmitError,
-    String? deliveredToLaptopAt,
-    bool clearLastSubmitError = false,
-    bool clearDeliveredToLaptopAt = false,
-  }) async {
-    final invoices = await loadPendingInvoices();
-    final index = invoices.indexWhere((e) => e.id == invoiceId);
-    if (index < 0) return;
-    invoices[index] = invoices[index].copyWith(
-      deliveryPending: deliveryPending,
-      submitAttempts: submitAttempts,
-      lastSubmitAttemptAt: lastSubmitAttemptAt,
-      lastSubmitError: lastSubmitError,
-      deliveredToLaptopAt: deliveredToLaptopAt,
-      clearLastSubmitError: clearLastSubmitError,
-      clearDeliveredToLaptopAt: clearDeliveredToLaptopAt,
-    );
-    await savePendingInvoices(invoices);
-  }
-
   static Future<List<AppUser>> _seedDefaultAdmin() async {
     final now = _nowIso();
     final user = AppUser(
@@ -834,9 +743,6 @@ class MobileAccessStore {
 
   static String nextDeviceId(String label) =>
       'dev-${_slug(label).isEmpty ? DateTime.now().millisecondsSinceEpoch : _slug(label)}';
-
-  static String nextPendingInvoiceId() =>
-      'pinv-${DateTime.now().microsecondsSinceEpoch}';
 
   static String nextOrderId() => 'ord-${DateTime.now().microsecondsSinceEpoch}';
 

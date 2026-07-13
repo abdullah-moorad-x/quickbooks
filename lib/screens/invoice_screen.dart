@@ -12,7 +12,6 @@ import '../models/customer.dart';
 import '../models/invoice.dart';
 import '../models/mobile_access.dart';
 import '../models/payment.dart';
-import '../services/mobile_draft_retry_service.dart';
 import '../services/mobile_sync_store.dart';
 import '../services/server_sync_client.dart';
 import '../services/storage.dart';
@@ -29,23 +28,19 @@ import '../widgets/app_panels.dart';
 /* ------------------------------- INVOICE CREATE SCREEN ------------------------------ */
 class InvoiceScreen extends StatefulWidget {
   final Invoice? initialInvoice;
-  final PendingInvoice? initialPendingDraft;
-  final MobileOrder? initialOrderDraft;
   final bool editing;
-  final bool mobileDraftMode;
   final bool pdfOnlyShare;
   final bool makeupInvoiceMode;
+  final bool startReturnFlow;
   final AppUser? draftUser;
 
   const InvoiceScreen({
     super.key,
     this.initialInvoice,
-    this.initialPendingDraft,
-    this.initialOrderDraft,
     this.editing = false,
-    this.mobileDraftMode = false,
     this.pdfOnlyShare = false,
     this.makeupInvoiceMode = false,
+    this.startReturnFlow = false,
     this.draftUser,
   });
   @override
@@ -56,12 +51,10 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     with AutomaticKeepAliveClientMixin {
   Invoice? _originalInvoice;
   bool get _isEditing => widget.editing && widget.initialInvoice != null;
-  bool get _isPdfOnlyShare => widget.pdfOnlyShare && widget.initialInvoice != null;
+  bool get _isPdfOnlyShare =>
+      widget.pdfOnlyShare && widget.initialInvoice != null;
   bool get _isMakeupInvoice => widget.makeupInvoiceMode;
   bool get _isPdfSendOnly => _isPdfOnlyShare || _isMakeupInvoice;
-  bool get _isPendingDraftEdit => widget.initialPendingDraft != null;
-  bool get _isMobileDraftMode => widget.mobileDraftMode;
-  bool get _isDraftFlow => _isMobileDraftMode || _isPendingDraftEdit;
   final _customerId = TextEditingController();
   final _customer = TextEditingController();
   final _contact = TextEditingController();
@@ -114,12 +107,8 @@ class _InvoiceScreenState extends State<InvoiceScreen>
   final _invoicePaymentBank = TextEditingController();
   final _invoicePaymentCheque = TextEditingController();
   final _invoicePaymentTxn = TextEditingController();
-  final ValueNotifier<int> _mobileDraftTick = ValueNotifier<int>(0);
-
   void _bumpMobileDraftTick() {
-    if (_isMobileDraftMode) {
-      _mobileDraftTick.value++;
-    }
+    if (mounted) setState(() {});
   }
 
   void _replaceLines(List<ItemLine> nextLines) {
@@ -202,92 +191,6 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     _customerLocked = false;
   }
 
-  void _applyPendingDraft(PendingInvoice draft) {
-    final remaining = List<PendingInvoiceLine>.from(draft.lines);
-    final nextLines = <ItemLine>[];
-    for (final type in kItemTypes) {
-      final index = remaining.indexWhere((line) => line.typeLabel == type);
-      if (index >= 0) {
-        final line = remaining.removeAt(index);
-        nextLines.add(
-          ItemLine(type, brand: line.brand, qty: line.qty, rate: line.rate),
-        );
-      } else {
-        nextLines.add(ItemLine(type));
-      }
-    }
-    for (final extra in remaining) {
-      nextLines.add(ItemLine(
-        extra.typeLabel,
-        brand: extra.brand,
-        qty: extra.qty,
-        rate: extra.rate,
-      ));
-    }
-    _replaceLines(nextLines);
-    _date.text = draft.invoiceDate;
-    _customerId.text = draft.customerId;
-    _customer.text = draft.customer;
-    _contact.text = draft.contact;
-    _address.text = draft.address;
-    final lookupParts = <String>[
-      if (draft.customerId.trim().isNotEmpty) draft.customerId.trim(),
-      if (draft.customer.trim().isNotEmpty) draft.customer.trim(),
-      if (draft.customerDisplay.trim().isNotEmpty &&
-          draft.customerDisplay.trim() != draft.customer.trim())
-        draft.customerDisplay.trim(),
-      if (draft.contact.trim().isNotEmpty) draft.contact.trim(),
-    ];
-    _customerLookup.text = lookupParts.join(' - ');
-    _site = draft.site.trim().isEmpty ? kShipmentSites.first : draft.site;
-    _cartageCtrl.text =
-        draft.cartage == 0 ? '0' : draft.cartage.toStringAsFixed(0);
-    _customerLocked = false;
-    _clearWalkInPaymentFields();
-    _clearInvoicePaymentFields();
-  }
-
-  void _applyOrderDraft(MobileOrder order) {
-    final nextLines = <ItemLine>[];
-    var matched = false;
-    final orderTypeKey = order.bagsType.trim().toUpperCase();
-    for (final type in kItemTypes) {
-      final isOrderType = type.trim().toUpperCase() == orderTypeKey;
-      matched = matched || isOrderType;
-      nextLines.add(
-        ItemLine(
-          type,
-          brand: isOrderType ? order.bagsBrand : '',
-          qty: isOrderType ? order.bagsQuantity : 0,
-        ),
-      );
-    }
-    if (!matched && order.bagsType.trim().isNotEmpty) {
-      nextLines.add(
-        ItemLine(
-          order.bagsType,
-          brand: order.bagsBrand,
-          qty: order.bagsQuantity,
-        ),
-      );
-    }
-    _replaceLines(nextLines);
-    try {
-      _date.text = formatInvoiceDate(parseInvoiceDate(order.orderDate));
-    } catch (_) {
-      _date.text = formatInvoiceDate(DateTime.now());
-    }
-    _customer.text = order.customerName.trim();
-    _customerLookup.text = order.customerName.trim();
-    _address.text = order.plotNo;
-    _site = kShipmentSites.contains(order.orderSite)
-        ? order.orderSite
-        : kShipmentSites.first;
-    _customerLocked = false;
-    _clearWalkInPaymentFields();
-    _clearInvoicePaymentFields();
-  }
-
   Future<void> _pickDate() async {
     DateTime initial;
     try {
@@ -310,11 +213,12 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     if (_isEditing) {
       _originalInvoice = widget.initialInvoice;
       _applyInvoice(_originalInvoice!);
-    } else if (_isPendingDraftEdit) {
-      _applyPendingDraft(widget.initialPendingDraft!);
-    } else if (_isMobileDraftMode && widget.initialOrderDraft != null) {
-      _applyOrderDraft(widget.initialOrderDraft!);
-    } else if (!_isDraftFlow) {
+      if (widget.startReturnFlow && !(_originalInvoice?.isReturn ?? false)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _recordReturnFromInvoice();
+        });
+      }
+    } else {
       Store.nextSerial().then((n) => setState(() => _sNo = n));
     }
     _loadSuggestions();
@@ -346,7 +250,6 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     _invoicePaymentBank.dispose();
     _invoicePaymentCheque.dispose();
     _invoicePaymentTxn.dispose();
-    _mobileDraftTick.dispose();
     for (final l in _lines) {
       l.dispose();
     }
@@ -356,37 +259,10 @@ class _InvoiceScreenState extends State<InvoiceScreen>
   void _onDataTick() {
     if (!mounted) return;
     _loadSuggestions();
-    if (_isEditing || _isDraftFlow) return;
+    if (_isEditing) return;
     Store.nextSerial().then((n) {
       if (mounted) setState(() => _sNo = n);
     });
-  }
-
-  Future<void> _savePendingDraftEdit() async {
-    final draft = widget.initialPendingDraft;
-    if (!_isPendingDraftEdit || draft == null) return;
-    if (!_validateInvoiceInputs()) return;
-    final snapshotLines = await _snapshotLinesForSave();
-    if (snapshotLines == null) return;
-    final updated = draft.copyWith(
-      invoiceDate: _date.text.trim(),
-      customerId: _customerId.text.trim(),
-      customer: _customer.text.trim(),
-      contact: _contact.text.trim(),
-      address: _address.text.trim(),
-      site: _site,
-      lines: snapshotLines
-          .map((line) => PendingInvoiceLine(
-                typeLabel: line.typeLabel,
-                brand: line.brand,
-                qty: line.qty,
-                rate: line.rate,
-              ))
-          .toList(),
-      cartage: _cartageVal,
-    );
-    if (!mounted) return;
-    Navigator.of(context).pop(updated);
   }
 
   Future<void> _loadSuggestions() async {
@@ -957,213 +833,6 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     }
   }
 
-  Future<void> _submitDraft({required bool openShare}) async {
-    final user = widget.draftUser;
-    if (!_isMobileDraftMode || user == null) {
-      showErr(context, 'Mobile draft user is not available.');
-      return;
-    }
-    if (!_validateInvoiceInputs()) return;
-    final snapshotLines = await _snapshotLinesForSave();
-    if (snapshotLines == null) return;
-    Customer? selected;
-    if (!_isWalkIn) {
-      selected = await CustomerStore.findById(_customerId.text.trim());
-      selected ??= await CustomerStore.findByName(_customer.text.trim());
-    }
-    final displayName = selected?.displayName ?? _customer.text.trim();
-    final internalName = selected?.name ?? _customer.text.trim();
-
-    setState(() {});
-    final draftCode = 'TMP-MOB-${DateTime.now().microsecondsSinceEpoch}';
-    final localDraft = PendingInvoice(
-      id: draftCode,
-      draftCode: draftCode,
-      submittedAt: DateTime.now().toIso8601String(),
-      invoiceDate: _date.text.trim(),
-      submittedByUserId: user.id,
-      submittedByName: user.displayName,
-      sourceDeviceId: 'mobile-app',
-      customerId: _customerId.text.trim(),
-      customer: internalName,
-      customerDisplay: displayName,
-      contact: _contact.text.trim(),
-      address: _address.text.trim(),
-      site: _site,
-      lines: snapshotLines
-          .map(
-            (line) => PendingInvoiceLine(
-              typeLabel: line.typeLabel,
-              brand: line.brand,
-              qty: line.qty,
-              rate: line.rate,
-            ),
-          )
-          .toList(),
-      cartage: _cartageVal,
-      deliveryPending: true,
-    );
-    await MobileAccessStore.upsertPendingInvoice(localDraft);
-
-    final payload = <String, dynamic>{
-      'draftCode': draftCode,
-      'deviceId': 'mobile-app',
-      'invoiceDate': _date.text.trim(),
-      'customer': internalName,
-      'customerDisplay': displayName,
-      'customerId': _customerId.text.trim(),
-      'contact': _contact.text.trim(),
-      'address': _address.text.trim(),
-      'site': _site,
-      'cartage': _cartageVal,
-      'lines': localDraft.lines.map((line) => line.toJson()).toList(),
-    };
-
-    if (openShare) {
-      try {
-        await _shareDraftMessage(
-          draftCode: localDraft.draftCode,
-          customerName: localDraft.customerDisplay.trim().isEmpty
-              ? localDraft.customer
-              : localDraft.customerDisplay,
-          contact: localDraft.contact,
-          lines: localDraft.lines,
-          cartage: localDraft.cartage,
-        );
-      } catch (_) {
-        if (!mounted) return;
-        showErr(context, 'Could not open share sheet. Draft saved on mobile.');
-        return;
-      }
-      await _finishSharedDraft(localDraft.draftCode);
-      unawaited(MobileDraftRetryService.retryNow(user));
-      return;
-    }
-
-    try {
-      final config = await MobileAccessStore.loadServerConfig();
-      final result = await ServerSyncClient.submitDraftInvoice(
-        baseUrl: config.baseUrl,
-        username: user.username,
-        passcode: user.passcode,
-        payload: payload,
-      );
-      final deliveredAt = DateTime.now().toIso8601String();
-      await MobileAccessStore.updatePendingInvoiceDelivery(
-        localDraft.id,
-        deliveryPending: false,
-        submitAttempts: localDraft.submitAttempts + 1,
-        lastSubmitAttemptAt: deliveredAt,
-        deliveredToLaptopAt: deliveredAt,
-        clearLastSubmitError: true,
-      );
-      if (!mounted) return;
-      showOk(context, 'Draft ${result.draftCode} sent to laptop.');
-      _resetFormToDefaults();
-      await _loadSuggestions();
-      if (mounted) setState(() {});
-    } on ServerSyncException catch (e) {
-      final attemptAt = DateTime.now().toIso8601String();
-      await MobileAccessStore.updatePendingInvoiceDelivery(
-        localDraft.id,
-        deliveryPending: true,
-        submitAttempts: localDraft.submitAttempts + 1,
-        lastSubmitAttemptAt: attemptAt,
-        lastSubmitError: e.message,
-      );
-      await MobileAccessStore.addSyncLog(
-        SyncLogEntry(
-          id: MobileAccessStore.nextSyncLogId(),
-          createdAt: attemptAt,
-          direction: SyncLogDirection.outgoing,
-          status: SyncLogStatus.warning,
-          entityType: 'pending_invoice',
-          entityId: localDraft.id,
-          summary: 'Draft ${localDraft.draftCode} queued on mobile',
-          details: e.message,
-        ),
-      );
-      if (!mounted) return;
-      showOk(
-        context,
-        'Draft ${localDraft.draftCode} saved on mobile. Retry will run every 5 minutes.',
-      );
-      _resetFormToDefaults();
-      await _loadSuggestions();
-      if (mounted) setState(() {});
-      unawaited(MobileDraftRetryService.retryNow(user));
-    }
-  }
-
-  Future<void> _finishSharedDraft(String draftCode) async {
-    await Future<void>.delayed(const Duration(milliseconds: 300));
-    if (!mounted) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      showOk(
-        context,
-        'Draft $draftCode saved. Sending to laptop in background.',
-      );
-      _resetFormToDefaults();
-      setState(() {});
-      unawaited(_loadSuggestions());
-    });
-  }
-
-  Future<void> _shareDraftMessage({
-    required String draftCode,
-    required String customerName,
-    required String contact,
-    required List<PendingInvoiceLine> lines,
-    required double cartage,
-  }) async {
-    final previewNo = await Store.nextSerial();
-    final previewInvoice = Invoice(
-      sNo: previewNo,
-      date: _date.text.trim(),
-      customer: customerName,
-      customerDisplay: customerName,
-      customerId: _customerId.text.trim().isNotEmpty
-          ? _customerId.text.trim()
-          : customerName,
-      contact: _contact.text.trim(),
-      address: _address.text.trim(),
-      site: _site,
-      lines: lines
-          .map(
-            (line) => ItemLine(
-              line.typeLabel,
-              brand: line.brand,
-              qty: line.qty,
-              rate: line.rate,
-            ),
-          )
-          .toList(),
-      cartage: cartage,
-      paid: 0,
-      walkIn: false,
-    );
-    final pdfBytes = await PdfBuilder.build(previewInvoice);
-    final invDir = await subdir('invoices');
-    final pdfFile = File(
-      '${invDir.path}${Platform.pathSeparator}draft_invoice_$draftCode.pdf',
-    );
-    final written = await safeWriteBytes(pdfFile, pdfBytes);
-    if (Platform.isAndroid || Platform.isIOS) {
-      await Share.shareXFiles(
-        [XFile(written.path)],
-        text: 'Draft invoice $draftCode for $customerName',
-        subject: 'QuickBill Draft Invoice',
-      );
-      return;
-    }
-    final digits = contact.replaceAll(RegExp(r'[^0-9]'), '');
-    final text =
-        'Draft invoice $draftCode for $customerName. Final approval will be done from laptop.';
-    final url = 'https://wa.me/$digits?text=${Uri.encodeComponent(text)}';
-    await OpenFilex.open(url);
-  }
-
   Future<void> _savePaymentFromInvoiceIfNeeded(Invoice inv) async {
     if (_isWalkIn || !_recordPaymentNow) return;
     final amount = inv.balance;
@@ -1203,6 +872,84 @@ class _InvoiceScreenState extends State<InvoiceScreen>
     );
   }
 
+  List<ItemLine> _returnableLines(Invoice inv) {
+    return inv.lines.where((line) => line.qty > 0).toList();
+  }
+
+  Future<void> _recordReturnFromInvoice() async {
+    final source = _originalInvoice ?? widget.initialInvoice;
+    if (!_isEditing || source == null || source.isReturn) return;
+    final returnLines = _returnableLines(source);
+    if (returnLines.isEmpty) {
+      showErr(context, 'No returnable quantity found on this invoice.');
+      return;
+    }
+
+    final result = await showDialog<_ReturnInvoiceResult>(
+      context: context,
+      builder: (_) => _ReturnInvoiceDialog(
+        invoiceNo: source.sNo,
+        lines: returnLines,
+      ),
+    );
+
+    if (!mounted || result == null) return;
+
+    final selectedLines = <ItemLine>[];
+    for (final line in returnLines) {
+      final qty = result.quantities[line] ?? 0;
+      if (qty == 0) continue;
+      selectedLines.add(ItemLine(
+        line.typeLabel,
+        brand: line.brand,
+        qty: -qty,
+        rate: line.rate,
+      ));
+    }
+
+    final Invoice returnInvoice;
+    final mobileUser = widget.draftUser;
+    if (mobileUser != null) {
+      try {
+        final config = await MobileAccessStore.loadServerConfig();
+        returnInvoice = await ServerSyncClient.recordInvoiceReturn(
+          baseUrl: config.baseUrl,
+          username: mobileUser.username,
+          passcode: mobileUser.passcode,
+          sourceInvoiceNo: source.sNo,
+          returnDate: formatInvoiceDate(result.date),
+          lines: selectedLines,
+        );
+      } on ServerSyncException catch (error) {
+        if (!mounted) return;
+        showErr(context, error.message);
+        return;
+      }
+    } else {
+      returnInvoice = Invoice(
+        sNo: await Store.nextSerial(),
+        date: formatInvoiceDate(result.date),
+        customer: source.customer,
+        customerDisplay: source.customerDisplay,
+        customerId: source.customerId,
+        contact: source.contact,
+        address: source.address,
+        site: source.site,
+        lines: selectedLines,
+        cartage: 0,
+        paid: 0,
+        walkIn: false,
+        isReturn: true,
+        returnOfInvoiceNo: source.sNo,
+      );
+      await _persistInvoice(returnInvoice);
+      await syncInvoicesPaidFromPayments();
+    }
+    if (!mounted) return;
+    showOk(context, 'Return #${returnInvoice.sNo} recorded');
+    Navigator.of(context).pop(returnInvoice);
+  }
+
   @override
   bool get wantKeepAlive => true;
 
@@ -1219,13 +966,7 @@ class _InvoiceScreenState extends State<InvoiceScreen>
             Row(children: [
               Expanded(
                 child: AppSectionTitle(
-                  title: _isMakeupInvoice
-                      ? 'Makeup Invoice'
-                      : _isDraftFlow
-                      ? (_isPendingDraftEdit
-                          ? 'Draft ${widget.initialPendingDraft!.draftCode}'
-                          : 'Draft Invoice')
-                      : 'S.No: $_sNo',
+                  title: _isMakeupInvoice ? 'Makeup Invoice' : 'S.No: $_sNo',
                 ),
               ),
               SizedBox(
@@ -1385,13 +1126,6 @@ class _InvoiceScreenState extends State<InvoiceScreen>
               const Text(
                 'Use this to prepare and send a PDF only. It will not be saved in records.',
               ),
-            ] else if (_isDraftFlow) ...[
-              const SizedBox(height: 12),
-              Text(
-                _isPendingDraftEdit
-                    ? 'Edit this pending draft with the same invoice page. Approval still happens from the laptop draft queue.'
-                    : 'Mobile uses the same invoice page, but submits a pending draft for laptop approval. Payment capture stays on desktop.',
-              ),
             ] else ...[
               const SizedBox(height: 12),
               AppSoftCard(
@@ -1484,59 +1218,33 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                     Row(children: [
                       Expanded(
                         child: Tooltip(
-                          message: _isPendingDraftEdit
-                              ? 'Save changes back to the pending draft'
-                              : _isMobileDraftMode
-                                  ? 'Submit this invoice as a pending draft'
-                                  : _isPdfSendOnly
-                                      ? 'Create and share a PDF without changing records'
-                                      : 'Save invoice without generating a PDF',
+                          message: _isPdfSendOnly
+                              ? 'Create and share a PDF without changing records'
+                              : 'Save invoice without generating a PDF',
                           child: FilledButton.icon(
-                            onPressed: _isPendingDraftEdit
-                                ? _savePendingDraftEdit
-                                : _isMobileDraftMode
-                                    ? () => _submitDraft(openShare: false)
-                                    : _isPdfSendOnly
-                                        ? _sharePdfOnly
-                                        : _saveInvoice,
+                            onPressed:
+                                _isPdfSendOnly ? _sharePdfOnly : _saveInvoice,
                             style: appGreenButtonStyle(context),
-                            icon: Icon(_isPendingDraftEdit
-                                ? Icons.save_outlined
-                                : _isMobileDraftMode
-                                    ? Icons.send_outlined
-                                    : _isPdfSendOnly
-                                        ? Icons.picture_as_pdf_outlined
-                                        : Icons.save_outlined),
+                            icon: Icon(_isPdfSendOnly
+                                ? Icons.picture_as_pdf_outlined
+                                : Icons.save_outlined),
                             label: Text(
-                                _isPendingDraftEdit
-                                    ? 'Save Draft'
-                                    : _isMobileDraftMode
-                                        ? 'Submit Draft'
-                                        : _isPdfSendOnly
-                                            ? 'Send PDF'
-                                            : 'Save Invoice',
+                                _isPdfSendOnly ? 'Send PDF' : 'Save Invoice',
                                 overflow: TextOverflow.ellipsis),
                           ),
                         ),
                       ),
-                      if (!_isPendingDraftEdit && !_isPdfSendOnly) ...[
+                      if (!_isPdfSendOnly) ...[
                         const SizedBox(width: 10),
                         Expanded(
                           child: Tooltip(
-                            message: _isMobileDraftMode
-                                ? 'Submit draft and open share sheet'
-                                : 'Auto-save, open folder and WhatsApp',
+                            message: 'Auto-save, open folder and WhatsApp',
                             child: FilledButton.tonalIcon(
-                              onPressed: _isMobileDraftMode
-                                  ? () => _submitDraft(openShare: true)
-                                  : _saveAndWhatsapp,
+                              onPressed: _saveAndWhatsapp,
                               style: appGreenOutlineButtonStyle(context),
                               icon: const FaIcon(FontAwesomeIcons.whatsapp,
                                   color: Color(0xFF25D366)),
-                              label: Text(
-                                  _isMobileDraftMode
-                                      ? 'Draft + Share'
-                                      : 'WhatsApp + Folder',
+                              label: const Text('WhatsApp + Folder',
                                   overflow: TextOverflow.ellipsis),
                             ),
                           ),
@@ -1549,12 +1257,7 @@ class _InvoiceScreenState extends State<InvoiceScreen>
             ),
           ),
         );
-        final totalsCard = _isDraftFlow
-            ? ValueListenableBuilder<int>(
-                valueListenable: _mobileDraftTick,
-                builder: (_, __, ___) => totalsCardContent,
-              )
-            : totalsCardContent;
+        final totalsCard = totalsCardContent;
 
         final topSection = isNarrow
             ? Column(
@@ -1591,29 +1294,15 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                       child: AppSectionTitle(title: 'Items'),
                     ),
                     const SizedBox(height: 8),
-                    (_isMobileDraftMode
-                        ? ValueListenableBuilder<int>(
-                            valueListenable: _mobileDraftTick,
-                            builder: (_, __, ___) => GridView.count(
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              crossAxisCount: gridCols,
-                              mainAxisSpacing: 10,
-                              crossAxisSpacing: 10,
-                              childAspectRatio: gridAspect,
-                              children:
-                                  _lines.map((l) => _itemCard(l)).toList(),
-                            ),
-                          )
-                        : GridView.count(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            crossAxisCount: gridCols,
-                            mainAxisSpacing: 10,
-                            crossAxisSpacing: 10,
-                            childAspectRatio: gridAspect,
-                            children: _lines.map((l) => _itemCard(l)).toList(),
-                          )),
+                    GridView.count(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisCount: gridCols,
+                      mainAxisSpacing: 10,
+                      crossAxisSpacing: 10,
+                      childAspectRatio: gridAspect,
+                      children: _lines.map((l) => _itemCard(l)).toList(),
+                    ),
                   ]),
                 ),
               ),
@@ -1622,24 +1311,29 @@ class _InvoiceScreenState extends State<InvoiceScreen>
         );
       },
     );
-    if (_isMobileDraftMode) return pageBody;
     return Scaffold(
       extendBodyBehindAppBar: false,
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-      appBar: (_isEditing || _isPendingDraftEdit)
+      appBar: _isEditing
           ? AppBar(
               titleSpacing: 0,
               title: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Text(_isPendingDraftEdit
-                    ? 'Edit Draft ${widget.initialPendingDraft!.draftCode}'
-                    : 'Edit Invoice #$_sNo'),
+                child: Text('Edit Invoice #$_sNo'),
               ),
               leading: IconButton(
                 icon: const Icon(Icons.arrow_back),
                 onPressed: () => Navigator.of(context).maybePop(),
               ),
               actions: [
+                if (_isEditing && !(widget.initialInvoice?.isReturn ?? false))
+                  TextButton.icon(
+                    onPressed: _recordReturnFromInvoice,
+                    icon: const Icon(Icons.assignment_return_outlined,
+                        color: Colors.white),
+                    label: const Text('Return',
+                        style: TextStyle(color: Colors.white)),
+                  ),
                 TextButton(
                   onPressed: () => Navigator.of(context).maybePop(),
                   child: const Text('Cancel',
@@ -2092,8 +1786,10 @@ class _InvoiceScreenState extends State<InvoiceScreen>
                   onPressed: canDelete
                       ? () {
                           setState(() {
-                            l.dispose();
                             _lines.remove(l);
+                          });
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            l.dispose();
                           });
                           _bumpMobileDraftTick();
                         }
@@ -2226,10 +1922,161 @@ class _InvoiceScreenState extends State<InvoiceScreen>
             ]),
           ]),
         ));
-    if (_isMobileDraftMode) {
-      return StatefulBuilder(
-          builder: (_, rowSetState) => buildCard(rowSetState));
-    }
     return buildCard((fn) => setState(fn));
+  }
+}
+
+class _ReturnInvoiceResult {
+  final DateTime date;
+  final Map<ItemLine, int> quantities;
+
+  const _ReturnInvoiceResult({
+    required this.date,
+    required this.quantities,
+  });
+}
+
+class _ReturnInvoiceDialog extends StatefulWidget {
+  final int invoiceNo;
+  final List<ItemLine> lines;
+
+  const _ReturnInvoiceDialog({
+    required this.invoiceNo,
+    required this.lines,
+  });
+
+  @override
+  State<_ReturnInvoiceDialog> createState() => _ReturnInvoiceDialogState();
+}
+
+class _ReturnInvoiceDialogState extends State<_ReturnInvoiceDialog> {
+  late DateTime _returnDate;
+  late final TextEditingController _dateController;
+  late final Map<ItemLine, TextEditingController> _quantityControllers;
+
+  @override
+  void initState() {
+    super.initState();
+    _returnDate = DateTime.now();
+    _dateController = TextEditingController(
+      text: formatInvoiceDate(_returnDate),
+    );
+    _quantityControllers = {
+      for (final line in widget.lines) line: TextEditingController(),
+    };
+  }
+
+  @override
+  void dispose() {
+    _dateController.dispose();
+    for (final controller in _quantityControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _returnDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked == null || !mounted) return;
+    setState(() {
+      _returnDate = picked;
+      _dateController.text = formatInvoiceDate(picked);
+    });
+  }
+
+  void _submit() {
+    final quantities = <ItemLine, int>{};
+    for (final line in widget.lines) {
+      final quantity =
+          int.tryParse(_quantityControllers[line]?.text.trim() ?? '') ?? 0;
+      if (quantity < 0 || quantity > line.qty) {
+        showErr(
+          context,
+          'Return quantity for ${line.typeLabel} must be 1 to ${line.qty}.',
+        );
+        return;
+      }
+      if (quantity > 0) quantities[line] = quantity;
+    }
+    if (quantities.isEmpty) {
+      showErr(context, 'Enter at least one returned quantity.');
+      return;
+    }
+    Navigator.of(context).pop(
+      _ReturnInvoiceResult(date: _returnDate, quantities: quantities),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Return Invoice #${widget.invoiceNo}'),
+      content: SizedBox(
+        width: 460,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _dateController,
+                readOnly: true,
+                decoration: const InputDecoration(
+                  labelText: 'Return date',
+                  suffixIcon: Icon(Icons.calendar_today_outlined),
+                ),
+                onTap: _pickDate,
+              ),
+              const SizedBox(height: 12),
+              for (final line in widget.lines) ...[
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        [
+                          line.typeLabel,
+                          if (line.brand.trim().isNotEmpty) line.brand.trim(),
+                          'sold ${line.qty}',
+                        ].join(' - '),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    SizedBox(
+                      width: 110,
+                      child: TextField(
+                        controller: _quantityControllers[line],
+                        keyboardType: TextInputType.number,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: 'Return qty',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          icon: const Icon(Icons.assignment_return_outlined),
+          onPressed: _submit,
+          label: const Text('Save return'),
+        ),
+      ],
+    );
   }
 }

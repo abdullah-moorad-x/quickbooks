@@ -20,6 +20,9 @@ String invoiceSummarySearchText(Invoice invoice) {
     invoice.address,
     invoice.site,
     invoice.date,
+    if (invoice.isReturn) 'return returned',
+    if (invoice.returnOfInvoiceNo != null)
+      'invoice ${invoice.returnOfInvoiceNo}',
     lineText,
   ].join(' ').toLowerCase();
 }
@@ -49,13 +52,20 @@ class InvoiceSummaryCard extends StatelessWidget {
   String get _title {
     final name = invoice.customer.trim();
     final address = invoice.address.trim();
-    if (address.isEmpty) return '#${invoice.sNo}  $name';
-    return '#${invoice.sNo}  $name  -  $address';
+    final prefix =
+        invoice.isReturn ? 'Return #${invoice.sNo}' : '#${invoice.sNo}';
+    if (address.isEmpty) return '$prefix  $name';
+    return '$prefix  $name  -  $address';
   }
 
   List<Widget> get _summaryChips {
     return [
       AppMetaChip(icon: Icons.calendar_today_outlined, text: invoice.date),
+      if (invoice.isReturn && invoice.returnOfInvoiceNo != null)
+        AppMetaChip(
+          icon: Icons.assignment_return_outlined,
+          text: 'From #${invoice.returnOfInvoiceNo}',
+        ),
       AppMetaChip(
         icon: Icons.local_shipping_outlined,
         text: 'Cartage ${fmt0(invoice.cartage)}',
@@ -77,7 +87,7 @@ class InvoiceSummaryCard extends StatelessWidget {
 
   List<String> get _itemChips {
     return invoice.lines
-        .where((line) => line.qty > 0)
+        .where((line) => line.qty != 0)
         .map((line) {
           final brand = line.brand.trim();
           final brandPart = brand.isEmpty ? '' : ' - $brand';

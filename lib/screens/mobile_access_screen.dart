@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
 
 import '../core/app_bus.dart';
 import '../models/mobile_access.dart';
-import '../screens/invoice_screen.dart';
+import '../services/firebase_push_sender.dart';
 import '../services/local_api_server.dart';
 import '../services/mobile_sync_store.dart';
-import '../utils/format.dart';
 import '../utils/snackbar.dart';
 import '../widgets/app_panels.dart';
 import '../widgets/skeleton_loader.dart';
@@ -29,16 +29,19 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
   bool _savingUser = false;
   bool _savingServer = false;
   bool _startingServer = false;
+  bool _testingPush = false;
+  bool _selectingFirebaseKey = false;
   bool _loading = true;
   bool _locationMonitorUnlocked = false;
   bool _locationPinSet = false;
 
   List<AppUser> _users = const [];
-  List<PendingInvoice> _pendingInvoices = const [];
   List<MobileUserLocation> _locations = const [];
   List<SyncLogEntry> _logs = const [];
+  List<MobileDevice> _devices = const [];
   ServerSyncConfig _serverConfig = const ServerSyncConfig();
   List<String> _reachableAddresses = const [];
+  String? _firebaseCredentialsPath;
 
   final DateFormat _stampFmt = DateFormat('dd MMM yyyy, hh:mm a');
 
@@ -72,25 +75,27 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     setState(() => _loading = true);
     final results = await Future.wait([
       MobileAccessStore.loadUsers(),
-      MobileAccessStore.loadPendingInvoices(),
       MobileAccessStore.loadUserLocations(),
       MobileAccessStore.loadSyncLogs(),
       MobileAccessStore.loadServerConfig(),
       MobileAccessStore.loadLocationMonitorPin(),
+      MobileAccessStore.loadDevices(),
     ]);
-    final serverConfig = results[4] as ServerSyncConfig;
+    final serverConfig = results[3] as ServerSyncConfig;
     final addresses =
         await LocalApiServer.reachableAddresses(serverConfig.port);
+    final firebaseCredentialsPath = await FirebasePushSender.credentialsPath();
     if (!mounted) return;
     setState(() {
       _users = results[0] as List<AppUser>;
-      _pendingInvoices = results[1] as List<PendingInvoice>;
-      _locations = results[2] as List<MobileUserLocation>;
-      _logs = results[3] as List<SyncLogEntry>;
+      _locations = results[1] as List<MobileUserLocation>;
+      _logs = results[2] as List<SyncLogEntry>;
       _serverConfig = serverConfig;
-      _locationPinSet = ((results[5] as String?) ?? '').trim().isNotEmpty;
+      _locationPinSet = ((results[4] as String?) ?? '').trim().isNotEmpty;
+      _devices = results[5] as List<MobileDevice>;
       if (!_locationPinSet) _locationMonitorUnlocked = false;
       _reachableAddresses = addresses;
+      _firebaseCredentialsPath = firebaseCredentialsPath;
       _serverHostCtrl.text = _serverConfig.host;
       _serverPortCtrl.text = _serverConfig.port.toString();
       _loading = false;
@@ -163,121 +168,6 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     await _load();
   }
 
-  Future<void> _markPendingInvoice(
-    PendingInvoice invoice,
-    PendingInvoiceStatus status,
-  ) async {
-    final action =
-        status == PendingInvoiceStatus.approved ? 'Approve' : 'Reject';
-    final noteCtrl = TextEditingController(text: invoice.reviewNote ?? '');
-    final result = await showDialog<_PendingReviewResult>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text('$action draft ${invoice.draftCode}'),
-          content: SizedBox(
-            width: 360,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (status == PendingInvoiceStatus.approved)
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Laptop will generate the final invoice number automatically on approval.',
-                    ),
-                  ),
-                if (status == PendingInvoiceStatus.approved)
-                  const SizedBox(height: 12),
-                TextField(
-                  controller: noteCtrl,
-                  maxLines: 3,
-                  decoration: InputDecoration(
-                    labelText: status == PendingInvoiceStatus.approved
-                        ? 'Approval note'
-                        : 'Reason',
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                Navigator.of(context).pop(
-                  _PendingReviewResult(noteCtrl.text.trim()),
-                );
-              },
-              child: Text(action),
-            ),
-          ],
-        );
-      },
-    );
-    noteCtrl.dispose();
-    if (result == null) return;
-    if (status == PendingInvoiceStatus.approved) {
-      final generatedInvoiceNo = await LocalApiServer.approvePendingInvoice(
-        invoice,
-        reviewNote: result.note.isEmpty ? null : result.note,
-      );
-      if (!mounted) return;
-      showOk(context, 'Draft approved as invoice #$generatedInvoiceNo.');
-      await _load();
-      return;
-    }
-    await MobileAccessStore.updatePendingInvoiceStatus(
-      invoice.id,
-      status,
-      reviewNote: result.note.isEmpty ? null : result.note,
-      approvedInvoiceNo: null,
-    );
-    await MobileAccessStore.addSyncLog(SyncLogEntry(
-      id: MobileAccessStore.nextSyncLogId(),
-      createdAt: DateTime.now().toIso8601String(),
-      direction: SyncLogDirection.local,
-      status: SyncLogStatus.success,
-      entityType: 'pending_invoice',
-      entityId: invoice.id,
-      summary:
-          '${pendingInvoiceStatusLabel(status)} draft ${invoice.draftCode}',
-      details: result.note.isEmpty ? null : result.note,
-    ));
-    if (!mounted) return;
-    showOk(context, 'Draft updated.');
-    await _load();
-  }
-
-  Future<void> _editPendingInvoice(PendingInvoice invoice) async {
-    final updated = await Navigator.of(context).push<PendingInvoice?>(
-      MaterialPageRoute(
-        builder: (context) => InvoiceScreen(
-          initialPendingDraft: invoice,
-        ),
-      ),
-    );
-    if (updated == null) return;
-    await MobileAccessStore.upsertPendingInvoice(updated);
-    await MobileAccessStore.addSyncLog(
-      SyncLogEntry(
-        id: MobileAccessStore.nextSyncLogId(),
-        createdAt: DateTime.now().toIso8601String(),
-        direction: SyncLogDirection.local,
-        status: SyncLogStatus.info,
-        entityType: 'pending_invoice',
-        entityId: updated.id,
-        summary: 'Edited pending draft ${updated.draftCode}',
-      ),
-    );
-    if (!mounted) return;
-    showOk(context, 'Pending draft updated.');
-    await _load();
-  }
-
   Future<void> _saveServerConfig() async {
     final port = int.tryParse(_serverPortCtrl.text.trim()) ?? 8787;
     setState(() => _savingServer = true);
@@ -335,6 +225,52 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
       showErr(context, e.toString());
     } finally {
       if (mounted) setState(() => _startingServer = false);
+    }
+  }
+
+  Future<void> _testPushNotification() async {
+    if (_testingPush) return;
+    setState(() => _testingPush = true);
+    final result = await FirebasePushSender.sendTestNotification();
+    if (!mounted) return;
+    setState(() => _testingPush = false);
+    if (result.delivered > 0) {
+      final removed = result.removedInvalidTokens > 0
+          ? ' Removed ${result.removedInvalidTokens} expired token(s).'
+          : '';
+      showOk(
+        context,
+        'Test notification sent to ${result.delivered} of ${result.attempted} phone(s).$removed',
+      );
+      await _load();
+      return;
+    }
+    showErr(
+      context,
+      result.error ?? 'Firebase could not deliver the test notification.',
+    );
+  }
+
+  Future<void> _selectFirebaseKey() async {
+    if (_selectingFirebaseKey) return;
+    setState(() => _selectingFirebaseKey = true);
+    try {
+      final selection = await FilePicker.pickFiles(
+        dialogTitle: 'Select Firebase service-account JSON key',
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+      );
+      final path = selection?.files.single.path;
+      if (path == null || path.trim().isEmpty) return;
+      await FirebasePushSender.setCredentialsPath(path);
+      if (!mounted) return;
+      setState(() => _firebaseCredentialsPath = path);
+      showOk(context, 'Firebase service-account key saved.');
+    } catch (error) {
+      if (!mounted) return;
+      showErr(context, error.toString().replaceFirst('FormatException: ', ''));
+    } finally {
+      if (mounted) setState(() => _selectingFirebaseKey = false);
     }
   }
 
@@ -433,6 +369,8 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
           const SizedBox(height: 12),
           _serverConfigCard(),
           const SizedBox(height: 12),
+          _pushNotificationCard(),
+          const SizedBox(height: 12),
           _locationMonitorCard(),
           const SizedBox(height: 12),
           _userManagementCard(),
@@ -467,6 +405,15 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
           value: '${_locations.length}',
           sublabel: _locations.isEmpty ? 'No shared devices' : 'Latest reports',
           icon: Icons.location_on_outlined,
+        ),
+        _SummaryTile(
+          label: 'Push phones',
+          value:
+              '${_devices.where((device) => (device.pushToken ?? '').isNotEmpty).length}',
+          sublabel: FirebasePushSender.lastSentAt == null
+              ? 'No test sent yet'
+              : 'Last push sent',
+          icon: Icons.notifications_active_outlined,
         ),
       ],
     );
@@ -608,7 +555,7 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
             ),
             const SizedBox(height: 4),
             const Text(
-              'Recommended path for Tailscale: run the server on laptop, then use the shown address from your phone.',
+              'The local server is exposed to mobile through your Cloudflare tunnel.',
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -669,6 +616,95 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
                     .map((address) => SelectableText(address))
                     .toList(),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pushNotificationCard() {
+    final registered = _devices
+        .where((device) => (device.pushToken ?? '').trim().isNotEmpty)
+        .toList();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Firebase Push Notifications',
+              style: Theme.of(context)
+                  .textTheme
+                  .titleMedium
+                  ?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              registered.isEmpty
+                  ? 'No phone has registered for push notifications yet.'
+                  : '${registered.length} trusted phone(s) registered.',
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _firebaseCredentialsPath == null
+                  ? 'Firebase key: Not selected'
+                  : 'Firebase key: $_firebaseCredentialsPath',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (FirebasePushSender.lastSentAt != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Last sent: ${_formatStamp(FirebasePushSender.lastSentAt!)}',
+              ),
+            ],
+            if ((FirebasePushSender.lastError ?? '').trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Last error: ${FirebasePushSender.lastError}',
+                style: const TextStyle(color: Colors.red),
+              ),
+            ],
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _selectingFirebaseKey ? null : _selectFirebaseKey,
+                  icon: const Icon(Icons.key_outlined),
+                  label: Text(
+                    _selectingFirebaseKey ? 'Selecting...' : 'Select key',
+                  ),
+                ),
+                FilledButton.icon(
+                  onPressed: _testingPush ? null : _testPushNotification,
+                  icon: const Icon(Icons.notifications_active_outlined),
+                  label: Text(
+                    _testingPush ? 'Sending test...' : 'Test push notification',
+                  ),
+                ),
+              ],
+            ),
+            if (registered.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: registered.map((device) {
+                  final user = _users.cast<AppUser?>().firstWhere(
+                        (item) => item?.id == device.userId,
+                        orElse: () => null,
+                      );
+                  return AppMetaChip(
+                    icon: Icons.phone_android_outlined,
+                    text:
+                        '${user?.displayName ?? device.label} - ${device.platform}',
+                  );
+                }).toList(),
+              ),
+            ],
           ],
         ),
       ),
@@ -827,259 +863,6 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     return '${age.inDays} day ago';
   }
 
-  Widget _pendingInvoicesCard() {
-    final pendingOnly = _pendingInvoices
-        .where((invoice) => invoice.status == PendingInvoiceStatus.pending)
-        .toList();
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Pending Mobile Drafts',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'Review, edit, approve, or reject invoice drafts sent from mobile.',
-            ),
-            const SizedBox(height: 12),
-            if (pendingOnly.isEmpty)
-              const Text('No pending mobile drafts yet.')
-            else
-              ...pendingOnly.map(_pendingInvoiceTile),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _pendingInvoiceTile(PendingInvoice invoice) {
-    final statusColor = switch (invoice.status) {
-      PendingInvoiceStatus.pending => Colors.orange.shade700,
-      PendingInvoiceStatus.approved => Colors.green.shade700,
-      PendingInvoiceStatus.rejected => Colors.red.shade700,
-    };
-    final ownerLine =
-        '${invoice.submittedByName}  •  ${_formatStamp(invoice.submittedAt)}';
-    return Card(
-      elevation: 0,
-      color: const Color(0xFFF8FAFC),
-      margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: const BorderSide(color: Color(0xFFDCE5EE)),
-      ),
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        collapsedShape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-        ),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-        ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 10,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  invoice.customer,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 16,
-                    color: Color(0xFF172033),
-                  ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: statusColor.withValues(alpha: .10),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    pendingInvoiceStatusLabel(invoice.status),
-                    style: TextStyle(
-                      color: statusColor,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              invoice.draftCode,
-              style: const TextStyle(
-                color: Color(0xFF596275),
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-        subtitle: Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Text(
-            ownerLine,
-            style: const TextStyle(color: Color(0xFF6C7485)),
-          ),
-        ),
-        children: [
-          Wrap(
-            spacing: 10,
-            runSpacing: 10,
-            children: [
-              _pendingMetaChip(
-                  Icons.calendar_today_outlined, 'Date ${invoice.invoiceDate}'),
-              _pendingMetaChip(Icons.place_outlined,
-                  'Site ${invoice.site.isEmpty ? '-' : invoice.site}'),
-              if (invoice.address.trim().isNotEmpty)
-                _pendingMetaChip(
-                  Icons.location_on_outlined,
-                  'Address ${invoice.address.trim()}',
-                ),
-              _pendingMetaChip(Icons.phone_outlined,
-                  'Contact ${invoice.contact.isEmpty ? '-' : invoice.contact}'),
-              _pendingMetaChip(
-                  Icons.payments_outlined, 'Total Rs ${fmt0(invoice.balance)}'),
-            ],
-          ),
-          const SizedBox(height: 10),
-          if (invoice.lines.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFFE1E7EF)),
-              ),
-              child: const Text(
-                'No lines in draft.',
-                style: TextStyle(color: Color(0xFF5E6678)),
-              ),
-            )
-          else
-            Column(
-              children: invoice.lines
-                  .map(
-                    (line) => Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(14),
-                        border: Border.all(color: const Color(0xFFE1E7EF)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  line.typeLabel,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    color: Color(0xFF172033),
-                                  ),
-                                ),
-                              ),
-                              Text(
-                                'Rs ${fmt0(line.amount)}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF172033),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            line.brand.isEmpty ? 'Brand: -' : line.brand,
-                            style: const TextStyle(color: Color(0xFF566074)),
-                          ),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              _pendingLinePill('Qty ${line.qty}'),
-                              _pendingLinePill('Rate ${fmt0(line.rate)}'),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          if ((invoice.reviewNote ?? '').trim().isNotEmpty) ...[
-            const SizedBox(height: 10),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF8E8),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFFF0DEAB)),
-              ),
-              child: Text(
-                'Review note: ${invoice.reviewNote}',
-                style: const TextStyle(color: Color(0xFF6D5A18)),
-              ),
-            ),
-          ],
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton.tonalIcon(
-                style: appGreenButtonStyle(context),
-                onPressed: () => _editPendingInvoice(invoice),
-                icon: const Icon(Icons.edit_outlined, size: 18),
-                label: const Text('Edit'),
-              ),
-              FilledButton.icon(
-                style: appGreenButtonStyle(context),
-                onPressed: invoice.status == PendingInvoiceStatus.approved
-                    ? null
-                    : () => _markPendingInvoice(
-                          invoice,
-                          PendingInvoiceStatus.approved,
-                        ),
-                icon: const Icon(Icons.check_circle_outline, size: 18),
-                label: const Text('Approve'),
-              ),
-              OutlinedButton.icon(
-                style: appDangerOutlineButtonStyle(context),
-                onPressed: invoice.status == PendingInvoiceStatus.rejected
-                    ? null
-                    : () => _markPendingInvoice(
-                          invoice,
-                          PendingInvoiceStatus.rejected,
-                        ),
-                icon: const Icon(Icons.close_outlined, size: 18),
-                label: const Text('Reject'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _syncLogsCard() {
     return Card(
       child: Padding(
@@ -1096,7 +879,7 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
             ),
             const SizedBox(height: 4),
             const Text(
-              'Audit trail for sync, user changes, and draft actions.',
+              'Audit trail for sync, user changes, and order actions.',
             ),
             const SizedBox(height: 12),
             if (_logs.isEmpty)
@@ -1141,48 +924,6 @@ class _MobileAccessScreenState extends State<MobileAccessScreen>
     final parsed = DateTime.tryParse(raw);
     if (parsed == null) return raw;
     return _stampFmt.format(parsed.toLocal());
-  }
-
-  Widget _pendingMetaChip(IconData icon, String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0xFFE1E7EF)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: const Color(0xFF6A7385)),
-          const SizedBox(width: 6),
-          Text(
-            text,
-            style: const TextStyle(
-              color: Color(0xFF364056),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _pendingLinePill(String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F6FA),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: Color(0xFF51607A),
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
   }
 }
 
@@ -1229,10 +970,4 @@ class _SummaryTile extends StatelessWidget {
       ),
     );
   }
-}
-
-class _PendingReviewResult {
-  final String note;
-
-  const _PendingReviewResult(this.note);
 }
