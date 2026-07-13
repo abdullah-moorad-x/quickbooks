@@ -14,6 +14,13 @@ String _stableJson(Map<String, dynamic> json) => jsonEncode(json);
 
 List<dynamic> _decodeJsonList(String source) => jsonDecode(source) as List;
 
+String _encodeJson(Object value) => jsonEncode(value);
+
+Future<void> _writeJson(File file, Object value) async {
+  final encoded = await compute(_encodeJson, value);
+  await file.writeAsString(encoded);
+}
+
 Future<List<dynamic>> _readJsonList(File f) async {
   return compute(_decodeJsonList, await f.readAsString());
 }
@@ -59,68 +66,75 @@ Future<List<PaymentEntry>> _readPaymentsFromDisk(File f) async {
 
 List<ItemLine> _cloneLines(List<ItemLine> lines) {
   return lines
-      .map((l) =>
-          ItemLine(l.typeLabel, brand: l.brand, qty: l.qty, rate: l.rate))
+      .map(
+        (l) => ItemLine(l.typeLabel, brand: l.brand, qty: l.qty, rate: l.rate),
+      )
       .toList();
 }
 
 List<Invoice> _cloneInvoices(List<Invoice> invoices) {
   return invoices
-      .map((inv) => Invoice(
-            sNo: inv.sNo,
-            date: inv.date,
-            customer: inv.customer,
-            customerDisplay: inv.customerDisplay,
-            customerId: inv.customerId,
-            contact: inv.contact,
-            address: inv.address,
-            site: inv.site,
-            lines: _cloneLines(inv.lines),
-            cartage: inv.cartage,
-            paid: inv.paid,
-            walkIn: inv.walkIn,
-            isReturn: inv.isReturn,
-            returnOfInvoiceNo: inv.returnOfInvoiceNo,
-            sourceOrderId: inv.sourceOrderId,
-            sourceReturnId: inv.sourceReturnId,
-            walkInPaymentType: inv.walkInPaymentType,
-            walkInPaymentNote: inv.walkInPaymentNote,
-            walkInBank: inv.walkInBank,
-            walkInChequeNo: inv.walkInChequeNo,
-            walkInTxnId: inv.walkInTxnId,
-            walkInBankMode: inv.walkInBankMode,
-          ))
+      .map(
+        (inv) => Invoice(
+          sNo: inv.sNo,
+          date: inv.date,
+          customer: inv.customer,
+          customerDisplay: inv.customerDisplay,
+          customerId: inv.customerId,
+          contact: inv.contact,
+          address: inv.address,
+          site: inv.site,
+          lines: _cloneLines(inv.lines),
+          cartage: inv.cartage,
+          paid: inv.paid,
+          walkIn: inv.walkIn,
+          isReturn: inv.isReturn,
+          returnOfInvoiceNo: inv.returnOfInvoiceNo,
+          sourceOrderId: inv.sourceOrderId,
+          sourceReturnId: inv.sourceReturnId,
+          walkInPaymentType: inv.walkInPaymentType,
+          walkInPaymentNote: inv.walkInPaymentNote,
+          walkInBank: inv.walkInBank,
+          walkInChequeNo: inv.walkInChequeNo,
+          walkInTxnId: inv.walkInTxnId,
+          walkInBankMode: inv.walkInBankMode,
+        ),
+      )
       .toList();
 }
 
 List<Customer> _cloneCustomers(List<Customer> customers) {
   return customers
-      .map((c) => Customer(
-            id: c.id,
-            name: c.name,
-            displayName: c.displayName,
-            contact: c.contact,
-            active: c.active,
-          ))
+      .map(
+        (c) => Customer(
+          id: c.id,
+          name: c.name,
+          displayName: c.displayName,
+          contact: c.contact,
+          active: c.active,
+        ),
+      )
       .toList();
 }
 
 List<PaymentEntry> _clonePayments(List<PaymentEntry> entries) {
   return entries
-      .map((e) => PaymentEntry(
-            id: e.id,
-            date: e.date,
-            customerId: e.customerId,
-            customer: e.customer,
-            type: e.type,
-            amount: e.amount,
-            discount: e.discount,
-            note: e.note,
-            chequeNo: e.chequeNo,
-            bank: e.bank,
-            txnId: e.txnId,
-            bankMode: e.bankMode,
-          ))
+      .map(
+        (e) => PaymentEntry(
+          id: e.id,
+          date: e.date,
+          customerId: e.customerId,
+          customer: e.customer,
+          type: e.type,
+          amount: e.amount,
+          discount: e.discount,
+          note: e.note,
+          chequeNo: e.chequeNo,
+          bank: e.bank,
+          txnId: e.txnId,
+          bankMode: e.bankMode,
+        ),
+      )
       .toList();
 }
 
@@ -155,7 +169,7 @@ class Store {
     final f = await _file();
     final previous = _cache == null ? await _readInvoicesFromDisk(f) : _cache!;
     _cache = _cloneInvoices(invs);
-    await f.writeAsString(jsonEncode(_cache!.map((e) => e.toJson()).toList()));
+    await _writeJson(f, _cache!.map((e) => e.toJson()).toList());
     await SyncChangeLogStore.recordDiff(
       entityType: 'invoice',
       previous: {
@@ -208,7 +222,7 @@ class Store {
       next.add(saved);
     }
     _cache = next;
-    await f.writeAsString(jsonEncode(_cache!.map((e) => e.toJson()).toList()));
+    await _writeJson(f, _cache!.map((e) => e.toJson()).toList());
     await SyncChangeLogStore.recordChange(
       entityType: 'invoice',
       entityId: inv.sNo.toString(),
@@ -280,7 +294,7 @@ class CustomerStore {
     final f = await _file();
     final previous = _cache == null ? await _readCustomersFromDisk(f) : _cache!;
     _cache = _cloneCustomers(cs);
-    await f.writeAsString(jsonEncode(_cache!.map((e) => e.toJson()).toList()));
+    await _writeJson(f, _cache!.map((e) => e.toJson()).toList());
     await SyncChangeLogStore.recordDiff(
       entityType: 'customer',
       previous: {
@@ -306,7 +320,8 @@ class CustomerStore {
   static Future<bool> setActive(String id, bool active) async {
     final all = await loadAll();
     final idx = all.indexWhere(
-        (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase());
+      (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase(),
+    );
     if (idx < 0) return false;
     all[idx].active = active;
     await saveAll(all);
@@ -317,7 +332,8 @@ class CustomerStore {
     final all = await loadAll();
     try {
       return all.firstWhere(
-          (c) => c.id.trim().toLowerCase() == id.trim().toLowerCase());
+        (c) => c.id.trim().toLowerCase() == id.trim().toLowerCase(),
+      );
     } catch (_) {
       return null;
     }
@@ -361,8 +377,12 @@ class CustomerStore {
     return 'CS${next.toString().padLeft(5, '0')}';
   }
 
-  static Future<bool> addCustomer(String id, String name, String phone,
-      {String? displayName}) async {
+  static Future<bool> addCustomer(
+    String id,
+    String name,
+    String phone, {
+    String? displayName,
+  }) async {
     id = id.trim();
     name = name.trim();
     phone = phone.trim();
@@ -370,7 +390,8 @@ class CustomerStore {
     if (id.isEmpty || name.isEmpty) return false;
     final all = await loadAll();
     final idx = all.indexWhere(
-        (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase());
+      (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase(),
+    );
     if (idx >= 0) {
       all[idx].name = name;
       all[idx].displayName = displayName;
@@ -378,21 +399,29 @@ class CustomerStore {
       await saveAll(all);
       return false;
     }
-    all.add(Customer(
+    all.add(
+      Customer(
         id: id,
         name: name,
         displayName: displayName,
         contact: phone,
-        active: true));
+        active: true,
+      ),
+    );
     await saveAll(all);
     return true;
   }
 
-  static Future<bool> updateNamePhone(String id, String name, String phone,
-      {String? displayName}) async {
+  static Future<bool> updateNamePhone(
+    String id,
+    String name,
+    String phone, {
+    String? displayName,
+  }) async {
     final all = await loadAll();
     final idx = all.indexWhere(
-        (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase());
+      (x) => x.id.trim().toLowerCase() == id.trim().toLowerCase(),
+    );
     if (idx < 0) return false;
     final updatedId = all[idx].id.trim();
     final updatedIdNorm = updatedId.toLowerCase();
@@ -454,20 +483,22 @@ class CustomerStore {
         continue;
       }
       paymentsChanged = true;
-      updatedPayments.add(PaymentEntry(
-        id: p.id,
-        date: p.date,
-        customerId: nextId,
-        customer: updatedName,
-        type: p.type,
-        amount: p.amount,
-        discount: p.discount,
-        note: p.note,
-        chequeNo: p.chequeNo,
-        bank: p.bank,
-        txnId: p.txnId,
-        bankMode: p.bankMode,
-      ));
+      updatedPayments.add(
+        PaymentEntry(
+          id: p.id,
+          date: p.date,
+          customerId: nextId,
+          customer: updatedName,
+          type: p.type,
+          amount: p.amount,
+          discount: p.discount,
+          note: p.note,
+          chequeNo: p.chequeNo,
+          bank: p.bank,
+          txnId: p.txnId,
+          bankMode: p.bankMode,
+        ),
+      );
     }
     if (paymentsChanged) {
       await PaymentStore.saveAll(updatedPayments);
@@ -478,19 +509,23 @@ class CustomerStore {
   static Future<void> upsertFixed(Customer c) async {
     final all = await loadAll();
     final idx = all.indexWhere(
-        (x) => x.id.trim().toLowerCase() == c.id.trim().toLowerCase());
+      (x) => x.id.trim().toLowerCase() == c.id.trim().toLowerCase(),
+    );
     if (idx >= 0) {
       c.active = all[idx].active;
       all[idx] = c;
       await saveAll(all);
       return;
     }
-    all.add(Customer(
+    all.add(
+      Customer(
         id: c.id,
         name: c.name,
         displayName: c.displayName,
         contact: c.contact,
-        active: true));
+        active: true,
+      ),
+    );
     await saveAll(all);
   }
 
@@ -546,7 +581,7 @@ class PaymentStore {
     final f = await _file();
     final previous = _cache == null ? await _readPaymentsFromDisk(f) : _cache!;
     _cache = _clonePayments(entries);
-    await f.writeAsString(jsonEncode(_cache!.map((e) => e.toJson()).toList()));
+    await _writeJson(f, _cache!.map((e) => e.toJson()).toList());
     await SyncChangeLogStore.recordDiff(
       entityType: 'payment',
       previous: {
@@ -593,10 +628,13 @@ class PaymentStore {
     final all = await loadAll();
     final norm = _normalizeCustomerKey(key);
     return all
-        .where((e) =>
-            _normalizeCustomerKey(
-                e.customerId.isNotEmpty ? e.customerId : e.customer) ==
-            norm)
+        .where(
+          (e) =>
+              _normalizeCustomerKey(
+                e.customerId.isNotEmpty ? e.customerId : e.customer,
+              ) ==
+              norm,
+        )
         .toList();
   }
 
@@ -626,7 +664,8 @@ class PaymentStore {
   static String _normalizeCustomerKey(String s) => s.trim().toLowerCase();
 
   static Future<List<PaymentEntry>?> _fillMissingCustomerIds(
-      List<PaymentEntry> entries) async {
+    List<PaymentEntry> entries,
+  ) async {
     try {
       final invoices = await Store.loadAll();
       if (invoices.isEmpty) return null;
@@ -661,7 +700,10 @@ class PaymentStore {
   }
 
   static PaymentEntry _copyWithCustomer(
-      PaymentEntry e, String customerId, String customerName) {
+    PaymentEntry e,
+    String customerId,
+    String customerName,
+  ) {
     return PaymentEntry(
       id: e.id,
       date: e.date,
@@ -696,7 +738,8 @@ class PaymentStore {
   }
 
   static Future<List<PaymentEntry>?> _fixPaymentIds(
-      List<PaymentEntry> entries) async {
+    List<PaymentEntry> entries,
+  ) async {
     // Ensure unique, formatted IDs per date (PAY-yyyymmdd-###).
     bool changed = false;
     final counters = <String, int>{}; // per-date max seq
@@ -767,21 +810,23 @@ class PaymentStore {
         final inv = invMap[legacy.invoiceNo];
         final custId = (inv?.customerId ?? '').toString();
         final custName = (inv?.customer ?? legacy.customer).toString();
-        entries.add(PaymentEntry(
-          id: legacy.id.isNotEmpty
-              ? legacy.id
-              : '${DateTime.now().microsecondsSinceEpoch}-${legacy.invoiceNo}',
-          date: legacy.date,
-          customerId: custId,
-          customer: custName,
-          type: legacy.type,
-          amount: legacy.amount,
-          chequeNo: legacy.chequeNo,
-          bank: legacy.bank,
-          txnId: legacy.txnId,
-          bankMode: legacy.bankMode,
-          note: 'Migrated from invoice payments',
-        ));
+        entries.add(
+          PaymentEntry(
+            id: legacy.id.isNotEmpty
+                ? legacy.id
+                : '${DateTime.now().microsecondsSinceEpoch}-${legacy.invoiceNo}',
+            date: legacy.date,
+            customerId: custId,
+            customer: custName,
+            type: legacy.type,
+            amount: legacy.amount,
+            chequeNo: legacy.chequeNo,
+            bank: legacy.bank,
+            txnId: legacy.txnId,
+            bankMode: legacy.bankMode,
+            note: 'Migrated from invoice payments',
+          ),
+        );
       } catch (_) {}
     }
     return entries;
