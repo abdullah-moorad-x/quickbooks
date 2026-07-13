@@ -329,7 +329,14 @@ class _PaymentsScreenState extends State<PaymentsScreen>
                         ],
                       ),
                     ),
-                    Expanded(child: Text(_activityLabel(row))),
+                    Expanded(
+                      child: Text(
+                        _activityLabel(row),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
                     Expanded(
                       child: Text(
                         fmt0(row.sales),
@@ -343,9 +350,10 @@ class _PaymentsScreenState extends State<PaymentsScreen>
                       ),
                     ),
                     Expanded(
+                      flex: 2,
                       child: Align(
                         alignment: Alignment.centerRight,
-                        child: _netBadge(row.net),
+                        child: _netBadge(row.net, compact: true),
                       ),
                     ),
                     const SizedBox(width: 8),
@@ -530,7 +538,10 @@ class _PaymentsScreenState extends State<PaymentsScreen>
                 Expanded(child: Text('LAST ACTIVITY')),
                 Expanded(child: Text('SALES', textAlign: TextAlign.right)),
                 Expanded(child: Text('PAID', textAlign: TextAlign.right)),
-                Expanded(child: Text('BALANCE', textAlign: TextAlign.right)),
+                Expanded(
+                  flex: 2,
+                  child: Text('BALANCE', textAlign: TextAlign.right),
+                ),
                 SizedBox(width: 32),
               ],
             ),
@@ -717,16 +728,16 @@ class _PaymentsScreenState extends State<PaymentsScreen>
     return a.date.compareTo(b.date);
   }
 
-  Widget _netBadge(double net) {
+  Widget _netBadge(double net, {bool compact = false}) {
     if (net > 1e-6) {
-      return const AppStatusPill(
-        text: 'Customer owes',
-        color: Color(0xFFB71C1C),
+      return AppStatusPill(
+        text: compact ? 'Owes' : 'Customer owes',
+        color: const Color(0xFFB71C1C),
       );
     } else if (net < -1e-6) {
-      return const AppStatusPill(
-        text: 'In credit',
-        color: Color(0xFF1B5E20),
+      return AppStatusPill(
+        text: compact ? 'Credit' : 'In credit',
+        color: const Color(0xFF1B5E20),
       );
     }
     return const AppStatusPill(
