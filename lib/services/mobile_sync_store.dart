@@ -15,6 +15,13 @@ List<dynamic> _decodeJsonList(String source) => jsonDecode(source) as List;
 Map<String, dynamic> _decodeJsonMap(String source) =>
     jsonDecode(source) as Map<String, dynamic>;
 
+String _encodeJson(Object value) => jsonEncode(value);
+
+Future<void> _writeJson(File file, Object value) async {
+  final encoded = await compute(_encodeJson, value);
+  await file.writeAsString(encoded);
+}
+
 Future<List<dynamic>> _readJsonList(File f) async {
   return compute(_decodeJsonList, await f.readAsString());
 }
@@ -24,8 +31,10 @@ Future<Map<String, dynamic>> _readJsonMap(File f) async {
 }
 
 String _slug(String value) {
-  final cleaned =
-      value.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-');
+  final cleaned = value.trim().toLowerCase().replaceAll(
+    RegExp(r'[^a-z0-9]+'),
+    '-',
+  );
   return cleaned.replaceAll(RegExp(r'^-+|-+$'), '');
 }
 
@@ -59,8 +68,9 @@ class MobileAccessStore {
         return List<AppUser>.from(seeded);
       }
       final raw = await _readJsonList(f);
-      final loaded =
-          raw.map((e) => AppUser.fromJson(e as Map<String, dynamic>)).toList();
+      final loaded = raw
+          .map((e) => AppUser.fromJson(e as Map<String, dynamic>))
+          .toList();
       if (loaded.isEmpty) {
         final seeded = await _seedDefaultAdmin();
         _usersCache = seeded;
@@ -78,9 +88,7 @@ class MobileAccessStore {
   static Future<void> saveUsers(List<AppUser> users) async {
     final f = await _file('mobile_users.json');
     _usersCache = List<AppUser>.from(users);
-    await f.writeAsString(
-      jsonEncode(_usersCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _usersCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -125,9 +133,7 @@ class MobileAccessStore {
   static Future<void> saveDevices(List<MobileDevice> devices) async {
     final f = await _file('mobile_devices.json');
     _devicesCache = List<MobileDevice>.from(devices);
-    await f.writeAsString(
-      jsonEncode(_devicesCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _devicesCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -155,8 +161,9 @@ class MobileAccessStore {
   static Future<void> saveOutgoingPayments(List<PaymentEntry> payments) async {
     final f = await _file('outgoing_mobile_payments.json');
     _outgoingPaymentsCache = List<PaymentEntry>.from(payments);
-    await f.writeAsString(
-      jsonEncode(_outgoingPaymentsCache!.map((e) => e.toJson()).toList()),
+    await _writeJson(
+      f,
+      _outgoingPaymentsCache!.map((e) => e.toJson()).toList(),
     );
     AppBus.bump();
   }
@@ -202,14 +209,15 @@ class MobileAccessStore {
   }
 
   static Future<void> saveOutgoingPaymentDeletes(
-      List<String> paymentIds) async {
+    List<String> paymentIds,
+  ) async {
     final f = await _file('outgoing_mobile_payment_deletes.json');
     _outgoingPaymentDeletesCache = paymentIds
         .map((e) => e.trim())
         .where((e) => e.isNotEmpty)
         .toSet()
         .toList();
-    await f.writeAsString(jsonEncode(_outgoingPaymentDeletesCache));
+    await _writeJson(f, _outgoingPaymentDeletesCache!);
     AppBus.bump();
   }
 
@@ -238,10 +246,11 @@ class MobileAccessStore {
         return [];
       }
       final raw = await _readJsonList(f);
-      final loaded = raw
-          .map((e) => MobileOrder.fromJson(e as Map<String, dynamic>))
-          .toList()
-        ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      final loaded =
+          raw
+              .map((e) => MobileOrder.fromJson(e as Map<String, dynamic>))
+              .toList()
+            ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
       _ordersCache = loaded;
       return List<MobileOrder>.from(loaded);
     } catch (_) {
@@ -258,13 +267,12 @@ class MobileAccessStore {
     final List<MobileOrder> next;
     if (mergeExisting) {
       final existing = await loadOrders();
-      final mergedById = {
-        for (final order in existing) order.id: order,
-      };
+      final mergedById = {for (final order in existing) order.id: order};
       for (final order in orders) {
         final current = mergedById[order.id];
-        final incoming =
-            current == null ? order : _preserveLocalOrderFields(order, current);
+        final incoming = current == null
+            ? order
+            : _preserveLocalOrderFields(order, current);
         mergedById[order.id] = current == null
             ? incoming
             : (_isOrderNewer(incoming, current) ? incoming : current);
@@ -275,9 +283,7 @@ class MobileAccessStore {
     }
     final sorted = next..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     _ordersCache = sorted;
-    await f.writeAsString(
-      jsonEncode(_ordersCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _ordersCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -361,9 +367,7 @@ class MobileAccessStore {
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     _ordersCache = sorted;
     final f = await _file('mobile_orders.json');
-    await f.writeAsString(
-      jsonEncode(sorted.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, sorted.map((e) => e.toJson()).toList());
     AppBus.bump();
     return incoming;
   }
@@ -396,7 +400,7 @@ class MobileAccessStore {
     final current = _surjaniTrucksCache == null
         ? null
         : (List<MobileTruck>.from(_surjaniTrucksCache!)
-          ..sort((a, b) => a.id.compareTo(b.id)));
+            ..sort((a, b) => a.id.compareTo(b.id)));
     if (current != null &&
         current.length == normalized.length &&
         List.generate(current.length, (index) {
@@ -412,9 +416,7 @@ class MobileAccessStore {
     }
     final f = await _file('surjani_trucks.json');
     _surjaniTrucksCache = List<MobileTruck>.from(trucks);
-    await f.writeAsString(
-      jsonEncode(_surjaniTrucksCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _surjaniTrucksCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -471,7 +473,7 @@ class MobileAccessStore {
     final current = _factoryTrucksCache == null
         ? null
         : (List<MobileTruck>.from(_factoryTrucksCache!)
-          ..sort((a, b) => a.id.compareTo(b.id)));
+            ..sort((a, b) => a.id.compareTo(b.id)));
     if (current != null &&
         current.length == normalized.length &&
         List.generate(current.length, (index) {
@@ -487,9 +489,7 @@ class MobileAccessStore {
     }
     final f = await _file('factory_trucks.json');
     _factoryTrucksCache = List<MobileTruck>.from(trucks);
-    await f.writeAsString(
-      jsonEncode(_factoryTrucksCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _factoryTrucksCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -536,10 +536,11 @@ class MobileAccessStore {
         return [];
       }
       final raw = await _readJsonList(f);
-      final loaded = raw
-          .map((e) => SyncLogEntry.fromJson(e as Map<String, dynamic>))
-          .toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      final loaded =
+          raw
+              .map((e) => SyncLogEntry.fromJson(e as Map<String, dynamic>))
+              .toList()
+            ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _syncLogsCache = loaded;
       return List<SyncLogEntry>.from(loaded);
     } catch (_) {
@@ -556,9 +557,7 @@ class MobileAccessStore {
       limited.removeRange(300, limited.length);
     }
     _syncLogsCache = limited;
-    await f.writeAsString(
-      jsonEncode(_syncLogsCache!.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, _syncLogsCache!.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -578,11 +577,14 @@ class MobileAccessStore {
         return [];
       }
       final raw = await _readJsonList(f);
-      final loaded = raw
-          .map((e) => MobileUserLocation.fromJson(e as Map<String, dynamic>))
-          .where((e) => e.userId.trim().isNotEmpty)
-          .toList()
-        ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
+      final loaded =
+          raw
+              .map(
+                (e) => MobileUserLocation.fromJson(e as Map<String, dynamic>),
+              )
+              .where((e) => e.userId.trim().isNotEmpty)
+              .toList()
+            ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
       _locationsCache = loaded;
       return List<MobileUserLocation>.from(loaded);
     } catch (_) {
@@ -610,9 +612,7 @@ class MobileAccessStore {
       ..sort((a, b) => b.receivedAt.compareTo(a.receivedAt));
     _locationsCache = sorted;
     final f = await _file('mobile_user_locations.json');
-    await f.writeAsString(
-      jsonEncode(sorted.map((e) => e.toJson()).toList()),
-    );
+    await _writeJson(f, sorted.map((e) => e.toJson()).toList());
     AppBus.bump();
   }
 
@@ -658,7 +658,7 @@ class MobileAccessStore {
       return;
     }
     _locationMonitorPinCache = clean;
-    await f.writeAsString(jsonEncode({'pin': clean}));
+    await _writeJson(f, {'pin': clean});
   }
 
   static Future<ServerSyncConfig> loadServerConfig() async {
@@ -682,7 +682,7 @@ class MobileAccessStore {
   static Future<void> saveServerConfig(ServerSyncConfig config) async {
     final f = await _file('server_sync_config.json');
     _serverConfigCache = config;
-    await f.writeAsString(jsonEncode(config.toJson()));
+    await _writeJson(f, config.toJson());
     AppBus.bump();
   }
 
@@ -709,7 +709,7 @@ class MobileAccessStore {
   ) async {
     final f = await _file('biometric_login_config.json');
     _biometricLoginConfigCache = config;
-    await f.writeAsString(jsonEncode(config.toJson()));
+    await _writeJson(f, config.toJson());
     AppBus.bump();
   }
 
@@ -725,16 +725,18 @@ class MobileAccessStore {
       updatedAt: now,
     );
     await saveUsers([user]);
-    await addSyncLog(SyncLogEntry(
-      id: 'log-${DateTime.now().microsecondsSinceEpoch}',
-      createdAt: now,
-      direction: SyncLogDirection.local,
-      status: SyncLogStatus.info,
-      entityType: 'users',
-      entityId: user.id,
-      summary: 'Seeded default mobile admin account',
-      details: 'Username: owner, passcode: 1234',
-    ));
+    await addSyncLog(
+      SyncLogEntry(
+        id: 'log-${DateTime.now().microsecondsSinceEpoch}',
+        createdAt: now,
+        direction: SyncLogDirection.local,
+        status: SyncLogStatus.info,
+        entityType: 'users',
+        entityId: user.id,
+        summary: 'Seeded default mobile admin account',
+        details: 'Username: owner, passcode: 1234',
+      ),
+    );
     return [user];
   }
 

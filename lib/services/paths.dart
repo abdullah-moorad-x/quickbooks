@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 const String? kCustomBaseDir = null;
+const bool kLabMode = true;
 
 Future<Directory> baseDir() async {
   if (kCustomBaseDir != null && kCustomBaseDir!.isNotEmpty) {
@@ -10,7 +11,8 @@ Future<Directory> baseDir() async {
     return d;
   }
   final docs = await getApplicationDocumentsDirectory();
-  final d = Directory('${docs.path}${Platform.pathSeparator}QuickBill');
+  const folder = kLabMode ? 'QuickBill Lab' : 'QuickBill';
+  final d = Directory('${docs.path}${Platform.pathSeparator}$folder');
   if (!await d.exists()) await d.create(recursive: true);
   return d;
 }
