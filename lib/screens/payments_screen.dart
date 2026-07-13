@@ -286,6 +286,79 @@ class _PaymentsScreenState extends State<PaymentsScreen>
       itemCount: _filteredRows.length,
       itemBuilder: (_, i) {
         final row = _filteredRows[i];
+        if (isDesktop) {
+          return Material(
+            color: i.isEven ? Colors.white : const Color(0xFFFAFBFC),
+            child: InkWell(
+              onTap: () => _openCustomerDetail(row),
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 54),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(color: Color(0xFFE7ECF2)),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            row.displayTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFF172033),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (row.contact.isNotEmpty)
+                            Text(
+                              row.contact,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF7A8496),
+                                fontSize: 11,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Expanded(child: Text(_activityLabel(row))),
+                    Expanded(
+                      child: Text(
+                        fmt0(row.sales),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        fmt0(row.payments),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: _netBadge(row.net),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      color: Color(0xFF98A2B3),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
         return Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: AppSoftCard(
@@ -440,10 +513,45 @@ class _PaymentsScreenState extends State<PaymentsScreen>
                   prefixIcon: Icon(Icons.search),
                   hintText: 'Search by name or customer ID')),
         ),
+        if (isDesktop)
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: const BoxDecoration(
+              color: Color(0xFFF1F4F8),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
+              border: Border(
+                bottom: BorderSide(color: Color(0xFFD7DEE8)),
+              ),
+            ),
+            child: const Row(
+              children: [
+                Expanded(flex: 3, child: Text('CUSTOMER')),
+                Expanded(child: Text('LAST ACTIVITY')),
+                Expanded(child: Text('SALES', textAlign: TextAlign.right)),
+                Expanded(child: Text('PAID', textAlign: TextAlign.right)),
+                Expanded(child: Text('BALANCE', textAlign: TextAlign.right)),
+                SizedBox(width: 32),
+              ],
+            ),
+          ),
         Expanded(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: isDesktop ? 12 : 0),
             child: isDesktop
-                ? listView
-                : RefreshIndicator(onRefresh: _refresh, child: listView)),
+                ? DecoratedBox(
+                    decoration: const BoxDecoration(
+                      border: Border(
+                        left: BorderSide(color: Color(0xFFE2E8F0)),
+                        right: BorderSide(color: Color(0xFFE2E8F0)),
+                        bottom: BorderSide(color: Color(0xFFE2E8F0)),
+                      ),
+                    ),
+                    child: listView,
+                  )
+                : RefreshIndicator(onRefresh: _refresh, child: listView),
+          ),
+        ),
       ],
     );
   }
