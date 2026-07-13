@@ -10,7 +10,7 @@ class AppPressable extends StatefulWidget {
     super.key,
     required this.child,
     this.onTap,
-    this.borderRadius = const BorderRadius.all(Radius.circular(8)),
+    this.borderRadius = const BorderRadius.all(Radius.circular(14)),
     this.pressedScale = .985,
   });
 
@@ -69,13 +69,16 @@ class AppSoftCard extends StatelessWidget {
       padding: margin ?? EdgeInsets.zero,
       child: Material(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(18),
         child: Container(
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFFE2E8F0)),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFFDCE5EE)),
           ),
-          child: Padding(padding: padding, child: child),
+          child: Padding(
+            padding: padding,
+            child: child,
+          ),
         ),
       ),
     );
@@ -123,7 +126,10 @@ class AppSectionTitle extends StatelessWidget {
             ],
           ),
         ),
-        if (trailing != null) ...[const SizedBox(width: 12), trailing!],
+        if (trailing != null) ...[
+          const SizedBox(width: 12),
+          trailing!,
+        ],
       ],
     );
   }
@@ -151,7 +157,7 @@ class AppMetaChip extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
         color: backgroundColor,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(999),
         border: Border.all(color: borderColor),
       ),
       child: Row(
@@ -178,7 +184,11 @@ class AppStatusPill extends StatelessWidget {
   final String text;
   final Color color;
 
-  const AppStatusPill({super.key, required this.text, required this.color});
+  const AppStatusPill({
+    super.key,
+    required this.text,
+    required this.color,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -186,11 +196,14 @@ class AppStatusPill extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: color.withValues(alpha: .10),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         text,
-        style: TextStyle(color: color, fontWeight: FontWeight.w700),
+        style: TextStyle(
+          color: color,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -203,10 +216,12 @@ ButtonStyle appGreenButtonStyle(BuildContext context) {
     foregroundColor: primary,
     iconColor: primary,
     side: const BorderSide(color: Color(0xFFB9DBD7)),
-    textStyle: Theme.of(
-      context,
-    ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+    textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(999),
+    ),
   );
 }
 
@@ -216,10 +231,12 @@ ButtonStyle appGreenOutlineButtonStyle(BuildContext context) {
     backgroundColor: Colors.white,
     foregroundColor: primary,
     side: const BorderSide(color: Color(0xFFB9DBD7)),
-    textStyle: Theme.of(
-      context,
-    ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+    textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(999),
+    ),
   );
 }
 
@@ -229,9 +246,11 @@ ButtonStyle appDangerOutlineButtonStyle(BuildContext context) {
     backgroundColor: Colors.white,
     foregroundColor: danger,
     side: const BorderSide(color: Color(0xFFF0C7C2)),
-    textStyle: Theme.of(
-      context,
-    ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+    textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(999),
+    ),
   );
 }

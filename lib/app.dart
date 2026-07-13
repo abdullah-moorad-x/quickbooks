@@ -29,16 +29,16 @@ class App extends StatelessWidget {
     final base = ThemeData(
       useMaterial3: true,
       colorScheme: const ColorScheme.light(
-        primary: Color(0xFF087F8C),
-        secondary: Color(0xFF2563EB),
-        surface: Color(0xFFFFFFFF),
+        primary: Color(0xFF00838F),
+        secondary: Color(0xFF2196F3),
+        surface: Colors.white,
         onPrimary: Colors.white,
-        onSurface: Color(0xFF172033),
+        onSurface: Colors.black87,
       ),
       fontFamily: 'Poppins',
-      scaffoldBackgroundColor: const Color(0xFFF6F8FB),
+      scaffoldBackgroundColor: Colors.white,
       appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFF087F8C),
+        backgroundColor: Color(0xFF00838F),
         foregroundColor: Colors.white,
         elevation: 0,
       ),
@@ -58,68 +58,39 @@ class App extends StatelessWidget {
 
     final theme = base.copyWith(
       textTheme: base.textTheme.copyWith(
-        titleLarge: base.textTheme.titleLarge?.copyWith(
-          fontWeight: FontWeight.w700,
-        ),
-        bodyMedium: base.textTheme.bodyMedium?.copyWith(
-          fontSize: 14.5,
-          height: 1.32,
-        ),
-        labelSmall: base.textTheme.labelSmall?.copyWith(
-          fontSize: 12,
-          letterSpacing: 0.2,
-        ),
+        titleLarge:
+            base.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+        bodyMedium:
+            base.textTheme.bodyMedium?.copyWith(fontSize: 14.5, height: 1.32),
+        labelSmall: base.textTheme.labelSmall
+            ?.copyWith(fontSize: 12, letterSpacing: 0.2),
       ),
       appBarTheme: base.appBarTheme.copyWith(
         titleTextStyle: const TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.w600,
-          color: Colors.white,
-        ),
+            fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white),
       ),
       inputDecorationTheme: const InputDecorationTheme(
         filled: true,
         isDense: true,
-        fillColor: Color(0xFFFFFFFF),
+        fillColor: Color(0xFFF3F6F8),
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(7)),
-          borderSide: BorderSide(color: Color(0xFFD7DEE8)),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+          borderSide: BorderSide(color: Color(0xFFCFD8DC)),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(7)),
-          borderSide: BorderSide(color: Color(0xFFD7DEE8)),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+          borderSide: BorderSide(color: Color(0xFFCFD8DC)),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(7)),
-          borderSide: BorderSide(color: Color(0xFF087F8C), width: 1.5),
+          borderRadius: BorderRadius.all(Radius.circular(10)),
+          borderSide: BorderSide(color: Color(0xFF00838F), width: 1.5),
         ),
         contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       ),
-      snackBarTheme: const SnackBarThemeData(
-        behavior: SnackBarBehavior.floating,
-      ),
-      tooltipTheme: const TooltipThemeData(
-        waitDuration: Duration(milliseconds: 500),
-      ),
-      cardTheme: const CardThemeData(
-        elevation: 0,
-        color: Colors.white,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(Radius.circular(8)),
-          side: BorderSide(color: Color(0xFFE2E8F0)),
-        ),
-      ),
-      dividerTheme: const DividerThemeData(color: Color(0xFFE7ECF2)),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-        ),
-      ),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
-        ),
-      ),
+      snackBarTheme:
+          const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+      tooltipTheme:
+          const TooltipThemeData(waitDuration: Duration(milliseconds: 500)),
     );
 
     return MaterialApp(
@@ -371,13 +342,9 @@ class _HomeState extends State<Home> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     const Text('QuickBill By Abdullah'),
-                    Text(
-                      _tabSubtitle(_tab),
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white70,
-                      ),
-                    ),
+                    Text(_tabSubtitle(_tab),
+                        style: const TextStyle(
+                            fontSize: 12, color: Colors.white70)),
                   ],
                 ),
               ),
@@ -404,107 +371,58 @@ class _HomeState extends State<Home> {
           const _WindowButtons(),
         ],
       ),
-      body: Row(
-        children: [
-          Container(
-            width: 216,
-            color: Colors.white,
-            padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
-            child: ListView(
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(10, 0, 10, 10),
-                  child: Text(
-                    'WORKSPACE',
-                    style: TextStyle(
-                      color: Color(0xFF8A94A6),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                _navItem(0, Icons.receipt_long_outlined, 'Invoices'),
-                _navItem(3, Icons.payments_outlined, 'Payments'),
-                _navItem(4, Icons.people_outline, 'Customers'),
-                _navItem(5, Icons.history_outlined, 'History'),
-                _navItem(9, Icons.insights_outlined, 'Stats'),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(10, 18, 10, 10),
-                  child: Text(
-                    'REPORTS & OPERATIONS',
-                    style: TextStyle(
-                      color: Color(0xFF8A94A6),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                _navItem(1, Icons.today_outlined, 'Daily reports'),
-                _navItem(2, Icons.calendar_month_outlined, 'Monthly reports'),
-                _navItem(6, Icons.account_balance_wallet_outlined, 'Ledgers'),
-                _navItem(7, Icons.warehouse_outlined, 'Godown'),
-                _navItem(8, Icons.phone_android_outlined, 'Mobile access'),
-              ],
-            ),
-          ),
-          const VerticalDivider(width: 1, thickness: 1),
-          Expanded(
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 1320),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 18, 24, 20),
-                  child: PageStorage(
-                    bucket: _bucket,
-                    child: IndexedStack(index: _tab, children: _pages),
-                  ),
-                ),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1200),
+          child: Builder(builder: (context) {
+            final w = MediaQuery.of(context).size.width;
+            final pad = w > 1200
+                ? 32.0
+                : w > 800
+                    ? 24.0
+                    : 16.0;
+            return Padding(
+              padding: EdgeInsets.symmetric(horizontal: pad, vertical: 16),
+              child: PageStorage(
+                bucket: _bucket,
+                child: IndexedStack(index: _tab, children: _pages),
               ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _navItem(int index, IconData icon, String label) {
-    final selected = _tab == index;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 3),
-      child: Material(
-        color: selected ? const Color(0xFFE7F4F5) : Colors.transparent,
-        borderRadius: BorderRadius.circular(7),
-        child: InkWell(
-          onTap: () => _goTo(index),
-          borderRadius: BorderRadius.circular(7),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 19,
-                  color: selected
-                      ? const Color(0xFF087F8C)
-                      : const Color(0xFF667085),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      color: selected
-                          ? const Color(0xFF075E68)
-                          : const Color(0xFF344054),
-                      fontSize: 13,
-                      fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+            );
+          }),
         ),
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        currentIndex: _tab,
+        onTap: _goTo,
+        showUnselectedLabels: false,
+        selectedFontSize: 12,
+        unselectedFontSize: 12,
+        selectedItemColor: Theme.of(context).colorScheme.primary,
+        unselectedItemColor:
+            Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.8),
+        items: const [
+          BottomNavigationBarItem(
+              icon: Icon(Icons.description), label: 'Invoice'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.table_view), label: 'Daily Reports'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.calendar_month), label: 'Monthly Reports'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.payments), label: 'Payments'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.people_alt), label: 'Customer Master'),
+          BottomNavigationBarItem(icon: Icon(Icons.history), label: 'History'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.account_balance_wallet), label: 'Ledger'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.warehouse_outlined), label: 'Godown Hisaab'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.phonelink_setup_outlined),
+              label: 'Mobile Access'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.insights_outlined), label: 'Stats'),
+        ],
       ),
     );
   }
@@ -513,8 +431,7 @@ class _HomeState extends State<Home> {
     try {
       final base = await baseDir();
       final marker = File(
-        '${base.path}${Platform.pathSeparator}.reexport_excel_default_sheet_fix.done',
-      );
+          '${base.path}${Platform.pathSeparator}.reexport_excel_default_sheet_fix.done');
       if (await marker.exists()) return;
 
       if (!mounted) return;
@@ -523,17 +440,12 @@ class _HomeState extends State<Home> {
 
       void updater() {
         if (!mounted) return;
-        _reexportProgress?.value = _ReexportState(
-          total,
-          completed,
-          skipped,
-          stage,
-        );
+        _reexportProgress?.value =
+            _ReexportState(total, completed, skipped, stage);
       }
 
       _reexportProgress ??= ValueNotifier<_ReexportState>(
-        const _ReexportState(0, 0, 0, 'Starting...'),
-      );
+          const _ReexportState(0, 0, 0, 'Starting...'));
       _showReexportDialog(context, _reexportProgress!);
 
       stage = 'Scanning data...';
@@ -603,8 +515,7 @@ class _HomeState extends State<Home> {
         stage = 'Profit & loss: $m';
         updater();
         await attempt(
-          () => exportMonthlyProfitLossExcel(DateTime.parse('$m-01')),
-        );
+            () => exportMonthlyProfitLossExcel(DateTime.parse('$m-01')));
       }
       for (final c in custList) {
         stage = 'Customer: $c';
@@ -615,15 +526,12 @@ class _HomeState extends State<Home> {
         stage = 'Payments: $m';
         updater();
         await attempt(
-          () => rebuildMonthlyPaymentsExcels(DateTime.parse('$m-01')),
-        );
+            () => rebuildMonthlyPaymentsExcels(DateTime.parse('$m-01')));
       }
 
       try {
-        await marker.writeAsString(
-          DateTime.now().toIso8601String(),
-          flush: true,
-        );
+        await marker.writeAsString(DateTime.now().toIso8601String(),
+            flush: true);
       } catch (_) {}
       stage = 'Completed';
       updater();
@@ -635,21 +543,17 @@ class _HomeState extends State<Home> {
       _reexportProgress = null;
       if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
         Navigator.of(context, rootNavigator: true).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Reports re-export finished'),
-            behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 2),
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Reports re-export finished'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ));
       }
     }
   }
 
   void _showReexportDialog(
-    BuildContext context,
-    ValueNotifier<_ReexportState> progress,
-  ) {
+      BuildContext context, ValueNotifier<_ReexportState> progress) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -670,22 +574,16 @@ class _HomeState extends State<Home> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Repairing Excel reports...',
-                        style: TextStyle(fontWeight: FontWeight.w600),
-                      ),
+                      const Text('Repairing Excel reports...',
+                          style: TextStyle(fontWeight: FontWeight.w600)),
                       const SizedBox(height: 12),
                       LinearProgressIndicator(value: s.total == 0 ? null : pct),
                       const SizedBox(height: 8),
                       Text(
-                        '${s.completed}/${s.total}    Skipped: ${s.skipped}',
-                      ),
+                          '${s.completed}/${s.total}    Skipped: ${s.skipped}'),
                       const SizedBox(height: 4),
-                      Text(
-                        s.stage,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      Text(s.stage,
+                          maxLines: 2, overflow: TextOverflow.ellipsis),
                     ],
                   );
                 },
@@ -710,43 +608,41 @@ class _WindowButtons extends StatelessWidget {
   const _WindowButtons();
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        IconButton(
-          tooltip: 'Minimize',
-          icon: const Icon(Icons.minimize, color: Colors.white),
-          onPressed: () async => windowManager.minimize(),
-          iconSize: 16,
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-          splashRadius: 16,
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          tooltip: 'Maximize/Restore',
-          icon: const Icon(Icons.crop_square, color: Colors.white),
-          onPressed: () async {
-            final isMax = await windowManager.isMaximized();
-            isMax
-                ? await windowManager.unmaximize()
-                : await windowManager.maximize();
-          },
-          iconSize: 16,
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-          splashRadius: 16,
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          tooltip: 'Close',
-          icon: const Icon(Icons.close, color: Colors.white),
-          onPressed: () async => windowManager.close(),
-          iconSize: 16,
-          padding: const EdgeInsets.all(4),
-          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
-          splashRadius: 16,
-        ),
-      ],
-    );
+    return Row(children: [
+      IconButton(
+        tooltip: 'Minimize',
+        icon: const Icon(Icons.minimize, color: Colors.white),
+        onPressed: () async => windowManager.minimize(),
+        iconSize: 16,
+        padding: const EdgeInsets.all(4),
+        constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+        splashRadius: 16,
+      ),
+      const SizedBox(width: 4),
+      IconButton(
+        tooltip: 'Maximize/Restore',
+        icon: const Icon(Icons.crop_square, color: Colors.white),
+        onPressed: () async {
+          final isMax = await windowManager.isMaximized();
+          isMax
+              ? await windowManager.unmaximize()
+              : await windowManager.maximize();
+        },
+        iconSize: 16,
+        padding: const EdgeInsets.all(4),
+        constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+        splashRadius: 16,
+      ),
+      const SizedBox(width: 4),
+      IconButton(
+        tooltip: 'Close',
+        icon: const Icon(Icons.close, color: Colors.white),
+        onPressed: () async => windowManager.close(),
+        iconSize: 16,
+        padding: const EdgeInsets.all(4),
+        constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+        splashRadius: 16,
+      ),
+    ]);
   }
 }
